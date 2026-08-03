@@ -54,6 +54,10 @@ class AirconApiError(HomeAssistantError):
     """Raised when the aircon API returns an error"""
 
 
+class AirconConnectionError(AirconApiError):
+    """Raised when a request cannot reach the aircon."""
+
+
 class Repository:
     """Simple Api class to send and get Aircon information"""
 
@@ -84,6 +88,7 @@ class Repository:
         # concurrent callers (a plain timestamp check allowed a race where two
         # requests both see the wait as satisfied and fire back-to-back).
         self._request_lock = asyncio.Lock()
+        self._connection_failure_count = 0
 
     @property
     def method(self) -> str | None:
@@ -158,7 +163,9 @@ class Repository:
                         )
                     return json.loads(body)
             except (ClientConnectionError, asyncio.TimeoutError) as ex:
-                raise AirconApiError(f"Aircon returned error: {ex}") from ex
+                raise AirconConnectionError(
+                    f"Aircon connection failed: {ex}"
+                ) from ex
 
         data = {
             "apiVer": self.api_version,
@@ -181,17 +188,28 @@ class Repository:
             if self._method in ("http", "https"):
                 try:
                     json_response = await _execute_request(self._method)
+                    self._connection_failure_count = 0
+                except AirconConnectionError:
+                    # A short network interruption does not imply that the unit
+                    # changed protocol. Preserve the known method and avoid an
+                    # immediate HTTP+HTTPS discovery burst while the adapter is
+                    # reconnecting. After several consecutive failed polls, clear
+                    # it so a genuinely stale persisted method can recover.
+                    self._connection_failure_count += 1
+                    if self._connection_failure_count >= 3:
+                        _LOGGER.info(
+                            "Stored communication method %r failed %s times; "
+                            "the next request will rediscover HTTP/HTTPS",
+                            self._method,
+                            self._connection_failure_count,
+                        )
+                        self._method = None
+                        self._connection_failure_count = 0
+                    raise
                 except AirconApiError:
-                    # The unit may have rebooted, changed protocol, or the
-                    # persisted method from a previous run may simply be stale -
-                    # reset so the next request rediscovers instead of wedging
-                    # itself permanently against a method that no longer works.
-                    _LOGGER.info(
-                        "Request with stored method %r failed; "
-                        "resetting so the next request rediscovers",
-                        self._method,
-                    )
-                    self._method = None
+                    # The unit returned an HTTP/API error, so the transport method
+                    # itself worked. Keep it and let the caller handle the response.
+                    self._connection_failure_count = 0
                     raise
 
             # If we haven't yet determined if https is required, find out
@@ -202,12 +220,14 @@ class Repository:
                     _LOGGER.info("Discovered working communication method: HTTP")
                     # Store the required communication method
                     self._method = "http"
+                    self._connection_failure_count = 0
                 except AirconApiError:
                     _LOGGER.debug("HTTP failed, trying HTTPS")
                     json_response = await _execute_request("https")
                     _LOGGER.info("Discovered working communication method: HTTPS")
                     # Store the required communication method
                     self._method = "https"
+                    self._connection_failure_count = 0
 
             self._next_request_after = datetime.now() + _MIN_TIME_BETWEEN_REQUESTS
 
@@ -223,7 +243,7 @@ class Repository:
         return (await self._post("getDeviceInfo"))["contents"]
 
     async def get_airco_id(self) -> str:
-        """Simple command to get aircon ID"""
+        """Simple command to get airco ID"""
         return (await self.get_info())["airconId"]
 
     async def update_account_info(
@@ -239,7 +259,7 @@ class Repository:
         return await self._post("updateAccountInfo", contents)
 
     async def del_account_info(self, airco_id: str) -> dict:
-        """delete the account info on the airco"""
+        """delete account info from the airco"""
         contents = {"accountId": self._operator_id, "airconId": airco_id}
         return await self._post("deleteAccountInfo", contents)
 
