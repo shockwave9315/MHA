@@ -89,6 +89,11 @@ class Repository:
         # requests both see the wait as satisfied and fire back-to-back).
         self._request_lock = asyncio.Lock()
         self._connection_failure_count = 0
+        # A method loaded from the config entry is only a hint until one request
+        # succeeds in this runtime. This lets startup recover if firmware or port
+        # configuration changed without probing both protocols on every brief
+        # disconnect after the method has been confirmed.
+        self._method_confirmed = False
 
     @property
     def method(self) -> str | None:
@@ -189,27 +194,49 @@ class Repository:
                 try:
                     json_response = await _execute_request(self._method)
                     self._connection_failure_count = 0
-                except AirconConnectionError:
-                    # A short network interruption does not imply that the unit
-                    # changed protocol. Preserve the known method and avoid an
-                    # immediate HTTP+HTTPS discovery burst while the adapter is
-                    # reconnecting. After several consecutive failed polls, clear
-                    # it so a genuinely stale persisted method can recover.
-                    self._connection_failure_count += 1
-                    if self._connection_failure_count >= 3:
+                    self._method_confirmed = True
+                except AirconConnectionError as connection_error:
+                    if not self._method_confirmed:
+                        # A persisted method can be stale. Probe the alternate once
+                        # during startup/first use so ConfigEntryNotReady retries do
+                        # not recreate this object forever with the same bad hint.
+                        alternate = "https" if self._method == "http" else "http"
                         _LOGGER.info(
-                            "Stored communication method %r failed %s times; "
-                            "the next request will rediscover HTTP/HTTPS",
+                            "Persisted communication method %r failed before "
+                            "confirmation; trying %s once",
                             self._method,
-                            self._connection_failure_count,
+                            alternate.upper(),
                         )
-                        self._method = None
+                        try:
+                            json_response = await _execute_request(alternate)
+                        except AirconApiError:
+                            raise connection_error
+                        self._method = alternate
                         self._connection_failure_count = 0
-                    raise
+                        self._method_confirmed = True
+                    else:
+                        # A short network interruption does not imply that the unit
+                        # changed protocol. Preserve the known method and avoid an
+                        # immediate HTTP+HTTPS discovery burst while the adapter is
+                        # reconnecting. After several consecutive failed polls, clear
+                        # it so a genuinely stale runtime method can recover.
+                        self._connection_failure_count += 1
+                        if self._connection_failure_count >= 3:
+                            _LOGGER.info(
+                                "Stored communication method %r failed %s times; "
+                                "the next request will rediscover HTTP/HTTPS",
+                                self._method,
+                                self._connection_failure_count,
+                            )
+                            self._method = None
+                            self._connection_failure_count = 0
+                            self._method_confirmed = False
+                        raise
                 except AirconApiError:
                     # The unit returned an HTTP/API error, so the transport method
                     # itself worked. Keep it and let the caller handle the response.
                     self._connection_failure_count = 0
+                    self._method_confirmed = True
                     raise
 
             # If we haven't yet determined if https is required, find out
@@ -221,6 +248,7 @@ class Repository:
                     # Store the required communication method
                     self._method = "http"
                     self._connection_failure_count = 0
+                    self._method_confirmed = True
                 except AirconApiError:
                     _LOGGER.debug("HTTP failed, trying HTTPS")
                     json_response = await _execute_request("https")
@@ -228,6 +256,7 @@ class Repository:
                     # Store the required communication method
                     self._method = "https"
                     self._connection_failure_count = 0
+                    self._method_confirmed = True
 
             self._next_request_after = datetime.now() + _MIN_TIME_BETWEEN_REQUESTS
 
@@ -243,7 +272,7 @@ class Repository:
         return (await self._post("getDeviceInfo"))["contents"]
 
     async def get_airco_id(self) -> str:
-        """Simple command to get airco ID"""
+        """Simple command to get aircon ID"""
         return (await self.get_info())["airconId"]
 
     async def update_account_info(
@@ -259,7 +288,7 @@ class Repository:
         return await self._post("updateAccountInfo", contents)
 
     async def del_account_info(self, airco_id: str) -> dict:
-        """delete account info from the airco"""
+        """delete the account info on the airco"""
         contents = {"accountId": self._operator_id, "airconId": airco_id}
         return await self._post("deleteAccountInfo", contents)
 
