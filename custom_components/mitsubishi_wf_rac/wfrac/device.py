@@ -4,18 +4,26 @@ from datetime import timedelta
 from typing import Any
 import logging
 
-from async_timeout import timeout
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .rac_parser import RacParser
-from .repository import AirconApiError, Repository
+from .repository import AirconApiError, AirconConnectionError, Repository
 from .models.aircon import Aircon, AirconStat
 
-from ..const import DOMAIN
+from ..const import DOMAIN, MIN_TIME_BETWEEN_UPDATES
 
 _LOGGER = logging.getLogger(__name__)
+
+# Commands issued within this window of each other (from any entity) are
+# coalesced into a single set_airco() call instead of being sent as separate
+# requests. The unit expects a full state block per request, so two
+# near-simultaneous separate commands can otherwise overwrite each other
+# instead of merging (e.g. a fan-speed change followed shortly by a
+# temperature change loses the fan change).
+UPDATE_CONSOLIDATION_PERIOD = timedelta(milliseconds=500)
+
 
 class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attributes
     """Device Class"""
@@ -59,24 +67,37 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         self._availability_retry_count = 0
         self._availability_retry_limit = availability_retry_limit
         self._create_swing_mode_select = create_swing_mode_select
+        self._connection_error_active = False
+        # Serializes set_airco() calls end-to-end (snapshot build through
+        # self._airco update) so a call can never build its diff from a
+        # snapshot that's stale because another set_airco() is still in
+        # flight - see set_airco() below.
+        self._send_lock = asyncio.Lock()
+        self._consolidated_params: dict[str, Any] = {}
+        self._consolidation_task: asyncio.Task | None = None
 
         super().__init__(
             hass,
             _LOGGER,
             name=name,
-            update_interval=timedelta(seconds=60),
+            update_interval=MIN_TIME_BETWEEN_UPDATES,
         )
 
     async def update(self):
         """Update the device information from API.
 
-        Called both directly (e.g. by entities' own async_update()) and by
-        the coordinator via _async_update_data() below. Does not call
-        async_refresh()/async_set_updated_data() - no entity in this
-        integration is a CoordinatorEntity/listener, so there's nothing to
-        notify, and calling async_refresh() here would re-enter
-        _async_update_data() -> update() from within the coordinator-driven
-        path.
+        Called both directly (initial fetch in __init__.py before entities
+        exist, and set_airco()'s own fallback fetch) and by the coordinator
+        via _async_update_data() below. Deliberately does not call
+        async_refresh()/async_set_updated_data() itself: on the coordinator
+        poll path, listeners are already notified automatically once
+        _async_update_data() returns, and calling async_refresh() here would
+        re-enter _async_update_data() -> update() from within that same path.
+        The other two call sites don't need a notification either - the
+        initial fetch runs before any entity/listener exists, and
+        set_airco()'s fallback fetch is immediately followed by a command
+        whose completion already triggers async_set_updated_data() (see
+        Device.async_queue_command()).
         """
 
         try:
@@ -86,6 +107,27 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
                 self._set_availability(False)
                 _LOGGER.warning("Received no data for device %s", self._airco_id)
                 return
+        except AirconConnectionError as ex:
+            # The adapter deliberately re-associates with Wi-Fi roughly once an
+            # hour. Treat that short transport gap separately from API/account
+            # errors: re-registering the account here only creates extra traffic
+            # while the module is reconnecting and may prolong the outage.
+            self._set_availability(False)
+            if not self._available:
+                if not self._connection_error_active:
+                    _LOGGER.warning(
+                        "Airco [%s] is temporarily unreachable: %s",
+                        self.device_name,
+                        ex,
+                    )
+                self._connection_error_active = True
+            else:
+                _LOGGER.debug(
+                    "Transient connection failure for airco [%s]: %s",
+                    self.device_name,
+                    ex,
+                )
+            return
         except (AirconApiError, KeyError) as ex:
             self._set_availability(False)
             _LOGGER.warning(
@@ -97,8 +139,8 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             # accounts (operator ids). Opening the official app or adding phones can
             # silently evict Home Assistant from that table, after which polls fail
             # until the integration is reloaded. Proactively re-register our account
-            # on failure so we recover automatically on the next poll if we were
-            # evicted. add_account() is self-contained and swallows its own errors.
+            # on an API-level failure so we recover automatically on the next poll if
+            # we were evicted. Transport failures are handled separately above.
             await self.add_account()
             return
 
@@ -113,6 +155,12 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             self._led_status = response.get("ledStat")
             self._auto_heating = response.get("autoHeating")
             self._set_availability(True)
+            if self._connection_error_active:
+                _LOGGER.info(
+                    "Connection to airco [%s] restored",
+                    self.device_name,
+                )
+                self._connection_error_active = False
         except (KeyError, TypeError, ValueError) as ex:
             _LOGGER.warning("Could not parse airco data", exc_info=ex)
             self._set_availability(False)
@@ -147,28 +195,68 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
     async def set_airco(self, params: dict[str, Any]) -> None:
         """Method to send airco command"""
         _LOGGER.debug("Setting airco: %s", params)
-        if self.airco is None:
-            # update() is a coroutine function; async_add_executor_job is for
-            # blocking sync calls and would not actually run it (no event loop
-            # in the executor thread), so the coroutine was silently never
-            # awaited. Await it directly instead.
-            await self.update()
+        # Held for the whole read-modify-send-update sequence, not just the
+        # send: the snapshot below must only ever be built from self._airco
+        # once no other set_airco() call is still in flight, otherwise a
+        # queued command (see async_queue_command()) could snapshot state
+        # from before a concurrent call's response landed and, once sent,
+        # silently revert whatever that call had just changed.
+        async with self._send_lock:
+            if self.airco is None:
+                # update() is a coroutine function; async_add_executor_job is for
+                # blocking sync calls and would not actually run it (no event loop
+                # in the executor thread), so the coroutine was silently never
+                # awaited. Await it directly instead.
+                await self.update()
 
-        if self._airco is None:
-            raise ValueError("Airco object is empty")
+            if self._airco is None:
+                raise ValueError("Airco object is empty")
 
-        airco_stat = AirconStat.from_aircon(self._airco)
+            airco_stat = AirconStat.from_aircon(self._airco)
 
-        for key, value in params.items():
-            setattr(airco_stat, key, value)
+            for key, value in params.items():
+                setattr(airco_stat, key, value)
 
+            try:
+                command = self._parser.to_base64(airco_stat)
+                response = await self._api.send_airco_command(self._airco_id, command)
+                self._airco = self._parser.translate_bytes(response)
+            except (AirconApiError, KeyError, TypeError, ValueError) as ex:
+                _LOGGER.warning("Could not send airco data: %s", str(ex))
+                raise
+
+    async def async_queue_command(self, params: dict[str, Any]) -> None:
+        """Queue an airco command, coalescing with any other calls made within
+        UPDATE_CONSOLIDATION_PERIOD into a single set_airco() call. Used by all
+        entities instead of calling set_airco() directly, so that e.g. a fan
+        speed change and a temperature change issued moments apart end up in
+        the same request instead of racing each other.
+        """
+        self._consolidated_params.update(params)
+        if self._consolidation_task is None:
+            self._consolidation_task = self.hass.async_create_task(
+                self._async_flush_queued_command()
+            )
+
+    async def _async_flush_queued_command(self) -> None:
+        await asyncio.sleep(UPDATE_CONSOLIDATION_PERIOD.total_seconds())
+        params = self._consolidated_params.copy()
+        self._consolidated_params.clear()
+        self._consolidation_task = None
         try:
-            command = self._parser.to_base64(airco_stat)
-            response = await self._api.send_airco_command(self._airco_id, command)
-            self._airco = self._parser.translate_bytes(response)
-        except (AirconApiError, KeyError, TypeError, ValueError) as ex:
-            _LOGGER.warning("Could not send airco data: %s", str(ex))
-            raise
+            await self.set_airco(params)
+        except (AirconApiError, KeyError, TypeError, ValueError):
+            # Already logged in set_airco(). This runs as a detached task
+            # (nothing awaits it), so without this the re-raised error becomes
+            # an orphaned "Task exception was never retrieved" with zero
+            # HA-visible feedback that the command never reached the unit.
+            # Still notify below so entities pick up self.available if the
+            # same failure already flipped it.
+            pass
+        # Immediately push the (possibly unchanged, on failure) state to all
+        # entities instead of leaving them to wait for the next poll (up to
+        # MIN_TIME_BETWEEN_UPDATES later).
+        self.async_set_updated_data(self._airco)
 
     def _set_availability(self, available: bool):
         """Set availability after retry count"""
@@ -283,7 +371,7 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             # is slow/flaky and frequently answers in 10-20s; a tighter coordinator
             # timeout here would cancel slow-but-valid polls and mark the entity
             # unavailable even though the unit was about to respond.
-            async with timeout(30):
+            async with asyncio.timeout(30):
                 await asyncio.gather(*[self.update()])
         except Exception as error:
             raise UpdateFailed(error) from error
