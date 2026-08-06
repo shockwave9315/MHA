@@ -9,7 +9,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .rac_parser import RacParser
-from .repository import AirconApiError, Repository
+from .repository import AirconApiError, AirconConnectionError, Repository
 from .models.aircon import Aircon, AirconStat
 
 from ..const import DOMAIN, MIN_TIME_BETWEEN_UPDATES
@@ -67,6 +67,7 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         self._availability_retry_count = 0
         self._availability_retry_limit = availability_retry_limit
         self._create_swing_mode_select = create_swing_mode_select
+        self._connection_error_active = False
         # Serializes set_airco() calls end-to-end (snapshot build through
         # self._airco update) so a call can never build its diff from a
         # snapshot that's stale because another set_airco() is still in
@@ -106,6 +107,27 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
                 self._set_availability(False)
                 _LOGGER.warning("Received no data for device %s", self._airco_id)
                 return
+        except AirconConnectionError as ex:
+            # The adapter deliberately re-associates with Wi-Fi roughly once an
+            # hour. Treat that short transport gap separately from API/account
+            # errors: re-registering the account here only creates extra traffic
+            # while the module is reconnecting and may prolong the outage.
+            self._set_availability(False)
+            if not self._available:
+                if not self._connection_error_active:
+                    _LOGGER.warning(
+                        "Airco [%s] is temporarily unreachable: %s",
+                        self.device_name,
+                        ex,
+                    )
+                self._connection_error_active = True
+            else:
+                _LOGGER.debug(
+                    "Transient connection failure for airco [%s]: %s",
+                    self.device_name,
+                    ex,
+                )
+            return
         except (AirconApiError, KeyError) as ex:
             self._set_availability(False)
             _LOGGER.warning(
@@ -117,8 +139,8 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             # accounts (operator ids). Opening the official app or adding phones can
             # silently evict Home Assistant from that table, after which polls fail
             # until the integration is reloaded. Proactively re-register our account
-            # on failure so we recover automatically on the next poll if we were
-            # evicted. add_account() is self-contained and swallows its own errors.
+            # on an API-level failure so we recover automatically on the next poll if
+            # we were evicted. Transport failures are handled separately above.
             await self.add_account()
             return
 
@@ -133,6 +155,12 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             self._led_status = response.get("ledStat")
             self._auto_heating = response.get("autoHeating")
             self._set_availability(True)
+            if self._connection_error_active:
+                _LOGGER.info(
+                    "Connection to airco [%s] restored",
+                    self.device_name,
+                )
+                self._connection_error_active = False
         except (KeyError, TypeError, ValueError) as ex:
             _LOGGER.warning("Could not parse airco data", exc_info=ex)
             self._set_availability(False)
