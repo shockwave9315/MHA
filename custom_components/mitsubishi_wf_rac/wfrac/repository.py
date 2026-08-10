@@ -214,18 +214,38 @@ class Repository:
                     # Discarding the method here would cost every later
                     # request an extra discovery round trip for nothing.
                     raise
-                except AirconApiError:
-                    # The unit may have rebooted, changed protocol, or the
-                    # persisted method from a previous run may simply be stale -
-                    # reset so the next request rediscovers instead of wedging
-                    # itself permanently against a method that no longer works.
+                except AirconConnectionError:
+                    # A persisted method can become stale across restarts (for
+                    # example after firmware switches the unit from HTTP to
+                    # HTTPS). Retrying on a fresh ConfigEntry would otherwise
+                    # recreate this Repository with the same stale method on
+                    # every HA setup attempt, so probe the alternate protocol
+                    # now and keep the recovered method on this Device.
+                    failed_method = self._method
+                    alternate_method = "https" if failed_method == "http" else "http"
                     _LOGGER.info(
-                        "Request with stored method %r failed; "
-                        "resetting so the next request rediscovers",
-                        self._method,
+                        "Request with stored method %r failed; trying %s",
+                        failed_method,
+                        alternate_method.upper(),
                     )
-                    self._method = None
-                    raise
+                    try:
+                        json_response = await _execute_request(alternate_method)
+                    except AirconCommandError:
+                        # The alternate transport answered, so it is the valid
+                        # protocol even though this command itself was refused.
+                        self._method = alternate_method
+                        raise
+                    except AirconConnectionError:
+                        # Neither transport answered. Forget the hint so a
+                        # later request can perform normal discovery again.
+                        self._method = None
+                        raise
+                    else:
+                        self._method = alternate_method
+                        _LOGGER.info(
+                            "Recovered communication method: %s",
+                            alternate_method.upper(),
+                        )
 
             # If we haven't yet determined if https is required, find out
             else:

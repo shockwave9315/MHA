@@ -359,7 +359,11 @@ class RacParser:
                 vals[i] == HOME_LEAVE_MODE_TAG_SIGNED
                 and vals[i + 1] == HOME_LEAVE_MODE_READ_MARKER
             ):
-                home_leave_mode_raw[vals[i + 2] & 0xFF] = vals[i + 3] & 0xFF
+                subcode = vals[i + 2] & 0xFF
+                value = vals[i + 3]
+                if subcode in (31, 32):
+                    value &= 0xFF
+                home_leave_mode_raw[subcode] = value
             elif (vals[i] & 0xFF) in SERVICE_DATA_CODES:
                 self._apply_service_data_segment(
                     ac_device, vals[i] & 0xFF, vals[i + 1] & 0xFF, vals[i + 2] & 0xFF

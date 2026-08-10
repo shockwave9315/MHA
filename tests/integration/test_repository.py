@@ -81,7 +81,9 @@ async def test_http_error_status_raises_command_error(repository):
 
 
 async def test_connection_failure_raises_connection_error(repository):
-    repo, _ = repository([ClientConnectionError("boom")])
+    repo, _ = repository(
+        [ClientConnectionError("http boom"), ClientConnectionError("https boom")]
+    )
     with pytest.raises(AirconConnectionError):
         await repo.get_aircon_stats("airco-id")
 
@@ -106,14 +108,34 @@ async def test_refused_command_keeps_the_discovered_method(repository):
 
 
 async def test_unreachable_unit_resets_the_discovered_method(repository):
-    """A dead transport says nothing about which protocol is right, so the
-    stored one is dropped and the next request rediscovers.
-    """
-    repo, _ = repository([ClientConnectionError("boom")])
+    """If neither stored nor alternate protocol answers, forget the hint."""
+    repo, session = repository(
+        [ClientConnectionError("http down"), ClientConnectionError("https down")]
+    )
 
     with pytest.raises(AirconConnectionError):
         await repo.get_aircon_stats("airco-id")
     assert repo.method is None
+    assert session.urls == [
+        "http://127.0.0.1:51443/beaver/command/getAirconStat",
+        "https://127.0.0.1:51443/beaver/command/getAirconStat",
+    ]
+
+
+async def test_stale_persisted_method_recovers_in_same_call(repository):
+    """A stale ConfigEntry protocol must not wedge every HA setup retry."""
+    repo, session = repository(
+        [ClientConnectionError("http stale"), _FakeResponse(200, _OK_BODY)]
+    )
+
+    result = await repo.get_aircon_stats("airco-id")
+
+    assert result == {"airconId": "airco-id"}
+    assert repo.method == "https"
+    assert session.urls == [
+        "http://127.0.0.1:51443/beaver/command/getAirconStat",
+        "https://127.0.0.1:51443/beaver/command/getAirconStat",
+    ]
 
 
 async def test_discovery_falls_back_to_https_on_a_command_error(repository):

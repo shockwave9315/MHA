@@ -32,6 +32,7 @@ from homeassistant.helpers import entity_registry as er
 
 from .entity import WfRacEntity
 from .wfrac.device import Device
+from .target_offset import resolve_target_offset_from_operation
 from .const import (
     ATTR_TARGET_TEMPERATURE,
     ATTR_COMPRESSOR_FREQUENCY,
@@ -54,7 +55,6 @@ from .const import (
     ATTR_COOL_HOT_JUDGE,
     CONF_INDOOR_OFFSET,
     CONF_OUTDOOR_OFFSET,
-    CONF_TARGET_OFFSET,
     CONF_SERVICE_DATA,
     SERVICE_SET_ENERGY_TOTAL,
     SIGNAL_SET_ENERGY_TOTAL,
@@ -286,9 +286,11 @@ class TemperatureSensor(WfRacEntity, SensorEntity):
             outdoor_offset = self._device.config_entry.options.get(CONF_OUTDOOR_OFFSET, 0.0)
             self._attr_native_value = self._device.airco.OutdoorTemp + outdoor_offset
         elif self._custom_type == ATTR_TARGET_TEMPERATURE:
-            # Kept symmetric with climate.py's target_temperature - see the
-            # comment in ClimateEntity._update_state().
-            target_offset = self._device.config_entry.options.get(CONF_TARGET_OFFSET, 0.0)
+            # Use the exact same mode-aware resolver as climate.py so the
+            # optional target sensor cannot disagree with the climate entity.
+            target_offset = resolve_target_offset_from_operation(
+                self._device.config_entry.options, self._device.airco.OperationMode
+            )
             self._attr_native_value = self._device.airco.PresetTemp + target_offset
 
 
