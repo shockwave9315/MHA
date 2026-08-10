@@ -19,8 +19,12 @@ _LOGGER = logging.getLogger(__name__)
 
 # Same bounds as the temp_rule_*/temp_setting_* fields in services.yaml's
 # set_home_leave_mode action.
-HOME_LEAVE_TEMP_MIN = 10.0
-HOME_LEAVE_TEMP_MAX = 50.0
+HOME_LEAVE_TEMP_BOUNDS = {
+    ("cooling", "TempRule"): (10.0, 50.0),
+    ("cooling", "TempSetting"): (10.0, 50.0),
+    ("heating", "TempRule"): (-20.0, 30.0),
+    ("heating", "TempSetting"): (0.0, 30.0),
+}
 HOME_LEAVE_TEMP_STEP = 0.5
 
 
@@ -64,8 +68,6 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
     _attr_has_entity_name: bool = True
     _attr_device_class = NumberDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_native_min_value = HOME_LEAVE_TEMP_MIN
-    _attr_native_max_value = HOME_LEAVE_TEMP_MAX
     _attr_native_step = HOME_LEAVE_TEMP_STEP
     _attr_mode = NumberMode.BOX
 
@@ -75,6 +77,9 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
         super().__init__(device)
         self._mode = mode
         self._attribute = attribute
+        self._attr_native_min_value, self._attr_native_max_value = HOME_LEAVE_TEMP_BOUNDS[
+            (mode, attribute)
+        ]
         slug = "temp_rule" if attribute == "TempRule" else "temp_setting"
         self._attr_translation_key = f"home_leave_{mode}_{slug}"
         self._attr_unique_id = (

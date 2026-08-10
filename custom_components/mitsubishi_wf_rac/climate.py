@@ -16,6 +16,7 @@ from homeassistant.helpers import config_validation as cv, entity_platform
 from .entity import WfRacEntity
 from .wfrac.device import Device
 from .wfrac.models.aircon import AirconCommands, HomeLeaveModeSetting
+from .target_offset import resolve_target_offset
 from .const import (
     DOMAIN,
     FAN_MODE_TRANSLATION,
@@ -35,9 +36,6 @@ from .const import (
     SWING_HORIZONTAL_MODE_TRANSLATION,
     SUPPORT_SWING_HORIZONTAL_MODES,
     CONF_INDOOR_OFFSET,
-    CONF_TARGET_OFFSET,
-    CONF_TARGET_OFFSET_COOL,
-    CONF_TARGET_OFFSET_HEAT,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -167,15 +165,7 @@ class AircoClimate(WfRacEntity, ClimateEntity):
         never resolve a different offset for the same mode (see beta2: that
         divergence is what caused the target_temperature re-send loop).
         """
-        options = self._device.config_entry.options
-        base_offset = options.get(CONF_TARGET_OFFSET, 0.0)
-        if hvac_mode in (HVACMode.COOL, HVACMode.DRY):
-            override = options.get(CONF_TARGET_OFFSET_COOL)
-        elif hvac_mode == HVACMode.HEAT:
-            override = options.get(CONF_TARGET_OFFSET_HEAT)
-        else:
-            override = None
-        return base_offset if override is None else override
+        return resolve_target_offset(self._device.config_entry.options, hvac_mode)
 
     async def async_set_temperature(self, **kwargs) -> None:
         """Set new target temperature."""

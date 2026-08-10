@@ -212,6 +212,17 @@ def test_parse_temperatures_home_leave_mode_all_six_subcodes_present(parser):
     )
 
 
+def test_parse_temperatures_home_leave_mode_preserves_negative_heating_rule(parser):
+    ac = Aircon()
+    vals = []
+    for sub, value in zip((27, 28, 29, 30, 31, 32), (70, -40, 66, 20, 3, 7)):
+        vals += [-8, 16, sub, value]
+    parser._parse_temperatures(ac, vals)
+    assert ac.HomeLeaveModeForHeating == HomeLeaveModeSetting(
+        TempRule=-20.0, TempSetting=10.0, AirFlow=3
+    )
+
+
 def test_parse_temperatures_home_leave_mode_partial_does_not_commit(parser):
     # Mirrors AirconStatCoder.byteToStat's all-or-nothing commit: five of six
     # subcodes present must leave both sides None, not a half-filled result.
@@ -270,7 +281,26 @@ def test_home_leave_mode_encode_decode_round_trip(parser):
     vals = []
     for group in groups:
         tag, _marker, sub, value = group
-        vals += [signed(tag), 16, sub, value]
+        vals += [signed(tag), 16, sub, signed(value)]
+
+    ac = Aircon()
+    parser._parse_temperatures(ac, vals)
+    assert ac.HomeLeaveModeForCooling == stat.HomeLeaveModeForCooling
+    assert ac.HomeLeaveModeForHeating == stat.HomeLeaveModeForHeating
+
+
+def test_home_leave_mode_negative_heating_rule_round_trip(parser):
+    stat = _base_stat(
+        HomeLeaveModeForCooling=HomeLeaveModeSetting(TempRule=35.0, TempSetting=33.0, AirFlow=2),
+        HomeLeaveModeForHeating=HomeLeaveModeSetting(TempRule=-20.0, TempSetting=10.0, AirFlow=1),
+    )
+    trailer = parser._variable_trailer(stat)
+    signed = lambda b: b - 256 if b > 127 else b
+    groups = [trailer[1 + i * 4:5 + i * 4] for i in range(6)]
+    vals = []
+    for group in groups:
+        tag, _marker, sub, value = group
+        vals += [signed(tag), 16, sub, signed(value)]
 
     ac = Aircon()
     parser._parse_temperatures(ac, vals)
