@@ -25,9 +25,16 @@ _HTTP_LOG = _LOGGER.getChild("http")
 
 # ensure that we don't overwhelm the aircon unit by waiting at least
 # this long between successive requests
-_MIN_TIME_BETWEEN_REQUESTS = timedelta(seconds=1)
+MIN_TIME_BETWEEN_REQUESTS = timedelta(seconds=1)
 
-_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# Ceiling for a single request. The adapter is slow and frequently answers in
+# 10-20s, so this cannot be tightened much - but it must leave room for a
+# second attempt inside the same coordinator poll, because discovery tries one
+# protocol and then the other. Device.POLL_TIMEOUT is derived from it; see the
+# note there for what happens when the two are equal.
+REQUEST_TIMEOUT = timedelta(seconds=25)
+
+_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT.total_seconds())
 
 
 def _create_permissive_ssl_context() -> ssl.SSLContext:
@@ -54,8 +61,24 @@ class AirconApiError(HomeAssistantError):
     """Raised when the aircon API returns an error"""
 
 
+class AirconCommandError(AirconApiError):
+    """Raised when the unit answered but refused the command itself.
+
+    Distinct from a transport failure: the module is reachable and the
+    protocol in use is the right one, it just declined this request (e.g.
+    HTTP 501 for an optional command). Callers use that difference to decide
+    whether the connection state is worth invalidating.
+    """
+
+
 class AirconConnectionError(AirconApiError):
-    """Raised when a request cannot reach the aircon."""
+    """Raised when the unit could not be reached at all.
+
+    The counterpart to AirconCommandError: nothing answered, so neither the
+    request nor the account it was sent under can be judged from it. These
+    modules restart their WiFi periodically on their own, so single
+    occurrences are expected rather than a fault.
+    """
 
 
 class Repository:
@@ -88,12 +111,6 @@ class Repository:
         # concurrent callers (a plain timestamp check allowed a race where two
         # requests both see the wait as satisfied and fire back-to-back).
         self._request_lock = asyncio.Lock()
-        self._connection_failure_count = 0
-        # A method loaded from the config entry is only a hint until one request
-        # succeeds in this runtime. This lets startup recover if firmware or port
-        # configuration changed without probing both protocols on every brief
-        # disconnect after the method has been confirmed.
-        self._method_confirmed = False
 
     @property
     def method(self) -> str | None:
@@ -163,14 +180,12 @@ class Repository:
                         body,
                     )
                     if resp.status >= 400:
-                        raise AirconApiError(
+                        raise AirconCommandError(
                             f"Aircon returned HTTP {resp.status} for {command!r}: {body}"
                         )
                     return json.loads(body)
             except (ClientConnectionError, asyncio.TimeoutError) as ex:
-                raise AirconConnectionError(
-                    f"Aircon connection failed: {ex}"
-                ) from ex
+                raise AirconConnectionError(f"Aircon returned error: {ex}") from ex
 
         data = {
             "apiVer": self.api_version,
@@ -193,72 +208,45 @@ class Repository:
             if self._method in ("http", "https"):
                 try:
                     json_response = await _execute_request(self._method)
-                    self._connection_failure_count = 0
-                    self._method_confirmed = True
-                except AirconConnectionError as connection_error:
-                    if not self._method_confirmed:
-                        # A persisted method can be stale. Probe the alternate once
-                        # during startup/first use so ConfigEntryNotReady retries do
-                        # not recreate this object forever with the same bad hint.
-                        alternate = "https" if self._method == "http" else "http"
-                        _LOGGER.info(
-                            "Persisted communication method %r failed before "
-                            "confirmation; trying %s once",
-                            self._method,
-                            alternate.upper(),
-                        )
-                        try:
-                            json_response = await _execute_request(alternate)
-                        except AirconApiError:
-                            raise connection_error
-                        self._method = alternate
-                        self._connection_failure_count = 0
-                        self._method_confirmed = True
-                    else:
-                        # A short network interruption does not imply that the unit
-                        # changed protocol. Preserve the known method and avoid an
-                        # immediate HTTP+HTTPS discovery burst while the adapter is
-                        # reconnecting. After several consecutive failed polls, clear
-                        # it so a genuinely stale runtime method can recover.
-                        self._connection_failure_count += 1
-                        if self._connection_failure_count >= 3:
-                            _LOGGER.info(
-                                "Stored communication method %r failed %s times; "
-                                "the next request will rediscover HTTP/HTTPS",
-                                self._method,
-                                self._connection_failure_count,
-                            )
-                            self._method = None
-                            self._connection_failure_count = 0
-                            self._method_confirmed = False
-                        raise
+                except AirconCommandError:
+                    # The unit answered, so the stored method is still the
+                    # right one - it just refused this particular command.
+                    # Discarding the method here would cost every later
+                    # request an extra discovery round trip for nothing.
+                    raise
                 except AirconApiError:
-                    # The unit returned an HTTP/API error, so the transport method
-                    # itself worked. Keep it and let the caller handle the response.
-                    self._connection_failure_count = 0
-                    self._method_confirmed = True
+                    # The unit may have rebooted, changed protocol, or the
+                    # persisted method from a previous run may simply be stale -
+                    # reset so the next request rediscovers instead of wedging
+                    # itself permanently against a method that no longer works.
+                    _LOGGER.info(
+                        "Request with stored method %r failed; "
+                        "resetting so the next request rediscovers",
+                        self._method,
+                    )
+                    self._method = None
                     raise
 
             # If we haven't yet determined if https is required, find out
             else:
                 _LOGGER.debug("No stored method; attempting discovery...")
                 try:
+                    # Deliberately falls back on any error, command errors
+                    # included: an HTTPS-only module can answer a plaintext
+                    # request with a status code rather than dropping the
+                    # connection, and that still means "try the other one".
                     json_response = await _execute_request("http")
                     _LOGGER.info("Discovered working communication method: HTTP")
                     # Store the required communication method
                     self._method = "http"
-                    self._connection_failure_count = 0
-                    self._method_confirmed = True
                 except AirconApiError:
                     _LOGGER.debug("HTTP failed, trying HTTPS")
                     json_response = await _execute_request("https")
                     _LOGGER.info("Discovered working communication method: HTTPS")
                     # Store the required communication method
                     self._method = "https"
-                    self._connection_failure_count = 0
-                    self._method_confirmed = True
 
-            self._next_request_after = datetime.now() + _MIN_TIME_BETWEEN_REQUESTS
+            self._next_request_after = datetime.now() + MIN_TIME_BETWEEN_REQUESTS
 
         _HTTP_LOG.debug(
             "Got response from %r: %r",
