@@ -16,6 +16,10 @@ jobs:
         uses: "hacs/action@main"
         with:
           category: "integration"
+          # This is a personal fork installed as a custom repository, not a
+          # candidate for the HACS default store. Keep all integration checks,
+          # but ignore repository metadata that is intentionally not enabled.
+          ignore: "topics issues"
 
   hassfest:
     name: Hassfest
