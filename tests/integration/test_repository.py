@@ -81,7 +81,9 @@ async def test_http_error_status_raises_command_error(repository):
 
 
 async def test_connection_failure_raises_connection_error(repository):
-    repo, _ = repository([ClientConnectionError("boom")])
+    repo, _ = repository(
+        [ClientConnectionError("http boom"), ClientConnectionError("https boom")]
+    )
     with pytest.raises(AirconConnectionError):
         await repo.get_aircon_stats("airco-id")
 
