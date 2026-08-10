@@ -38,8 +38,9 @@
         "description": "Nachfolgend finden Sie die Optionen, die Sie für diese Klimaanlage ändern können.",
         "data": {
           "host": "Host (IP) Adresse",
-          "availability_check": "Verfügbarkeit prüfen",
-          "availability_retry_limit": "max. Anzahl Wiederholungen",
+          "availability_retry_limit": "max. Anzahl Wiederholungen (mind. 3)",
+          "firmware_update_check": "Firmware-Update-Prüfung (Online)",
+          "service_data": "Servicedaten",
           "create_swing_mode_select": "Ob zusätzliche Schwenkmodus-Auswahlen erstellt werden sollen.",
           "indoor_offset": "Innentemperatur Sensor-Offset",
           "outdoor_offset": "Außentemperatur Sensor-Offset",
@@ -125,6 +126,48 @@
           "medium": "Mittel",
           "high": "Hoch"
         }
+      },
+      "home_leave_mode": {
+        "name": "Abwesenheitsmodus",
+        "state": {
+          "off": "Aus",
+          "away_cool": "Abwesend Kühlen",
+          "away_heat": "Abwesend Heizen"
+        }
+      },
+      "home_leave_cooling_air_flow": {
+        "name": "Home Leave Kühlen Lüfterstufe",
+        "state": {
+          "auto": "Auto",
+          "1": "1",
+          "2": "2",
+          "3": "3",
+          "4": "4"
+        }
+      },
+      "home_leave_heating_air_flow": {
+        "name": "Home Leave Heizen Lüfterstufe",
+        "state": {
+          "auto": "Auto",
+          "1": "1",
+          "2": "2",
+          "3": "3",
+          "4": "4"
+        }
+      }
+    },
+    "number": {
+      "home_leave_cooling_temp_rule": {
+        "name": "Home Leave Kühlen Außen-Temp.-Vorgabe"
+      },
+      "home_leave_cooling_temp_setting": {
+        "name": "Home Leave Kühlen Soll-Raumtemp."
+      },
+      "home_leave_heating_temp_rule": {
+        "name": "Home Leave Heizen Außen-Temp.-Vorgabe"
+      },
+      "home_leave_heating_temp_setting": {
+        "name": "Home Leave Heizen Soll-Raumtemp."
       }
     },
     "sensor": {
@@ -174,7 +217,25 @@
         "name": "Kühl-/Heiz-Status"
       },
       "energy_usage": {
-        "name": "Energieverbrauch"
+        "name": "Energieverbrauch (aktueller Lauf)"
+      },
+      "energy_usage_total": {
+        "name": "Energieverbrauch gesamt"
+      },
+      "compressor_frequency": {
+        "name": "Kompressorfrequenz"
+      },
+      "operating_current": {
+        "name": "Betriebsstrom"
+      },
+      "hot_gas_temp": {
+        "name": "Heißgastemperatur"
+      },
+      "eev_pulses": {
+        "name": "EEV-Pulse"
+      },
+      "eev_position": {
+        "name": "EEV-Position"
       }
     },
     "binary_sensor": {
@@ -182,12 +243,21 @@
         "name": "Problem"
       },
       "occupancy": {
-        "name": "Belegung"
+        "name": "Anwesenheit"
+      },
+      "compressor": {
+        "name": "Kompressoranforderung"
       }
     },
-    "switch": {
-      "home_leave_mode": {
-        "name": "Abwesenheitsmodus"
+    "switch": {},
+    "update": {
+      "firmware_update": {
+        "name": "Firmware-Update"
+      }
+    },
+    "button": {
+      "reset_energy_total": {
+        "name": "Energieverbrauch gesamt zurücksetzen"
       }
     }
   }

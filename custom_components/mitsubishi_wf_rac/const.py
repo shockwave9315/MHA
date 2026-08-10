@@ -18,8 +18,22 @@ MIN_TIME_BETWEEN_UPDATES=timedelta(seconds=60)
 
 CONF_OPERATOR_ID = "operator_id"
 CONF_AIRCO_ID = "airco_id"
+# Removed option, kept only so async_migrate_entry can strip it from entries
+# that predate v5. Nothing outside the migration reads it.
 CONF_AVAILABILITY_CHECK = "availability_check"
+# Consecutive failed polls before the device is reported unavailable; floored
+# at wfrac/device.py's AVAILABILITY_FAILURE_LIMIT_MIN.
 CONF_AVAILABILITY_RETRY_LIMIT = "availability_retry_limit"
+# Gates all outbound internet traffic (as opposed to local-network device
+# polling) - the manufacturer's getFirmware endpoint. Off by default: unlike
+# availability polling, this isn't required for the integration to work, and
+# some users may not want any cloud call at all - see Device._maybe_check_firmware_update().
+CONF_FIRMWARE_UPDATE_CHECK = "firmware_update_check"
+# Gates the periodic service-data (operation-data) request - stays on the
+# local network, but is an extra setAirconStat write on top of the regular
+# read-only poll, so off by default like the firmware check above. See
+# Device._maybe_request_service_data().
+CONF_SERVICE_DATA = "service_data"
 CONF_CREATE_SWING_MODE_SELECT = "create_swing_mode_select"
 CONF_CONNECTION_METHOD = "connection_method"
 ATTR_DEVICE_ID = "device_id"
@@ -34,6 +48,13 @@ ATTR_COOL_HOT_JUDGE = "cool_hot_judge"
 ATTR_INSIDE_TEMPERATURE = "inside_temperature"
 ATTR_OUTSIDE_TEMPERATURE = "outside_temperature"
 ATTR_TARGET_TEMPERATURE = "target_temperature"
+
+# Service data (operation-data codes), see CONF_SERVICE_DATA above
+ATTR_COMPRESSOR_FREQUENCY = "compressor_frequency"
+ATTR_OPERATING_CURRENT = "operating_current"
+ATTR_HOT_GAS_TEMP = "hot_gas_temp"
+ATTR_EEV_PULSES = "eev_pulses"
+ATTR_EEV_POSITION = "eev_position"
 
 # New offset constants
 CONF_INDOOR_OFFSET = "indoor_offset"
@@ -59,6 +80,14 @@ SENSOR_TYPES = {
 
 SERVICE_SET_HORIZONTAL_SWING_MODE = "set_horizontal_swing_mode"
 SERVICE_SET_VERTICAL_SWING_MODE = "set_vertical_swing_mode"
+SERVICE_REQUEST_HOME_LEAVE_MODE_STATUS = "request_home_leave_mode_status"
+SERVICE_SET_HOME_LEAVE_MODE = "set_home_leave_mode"
+SERVICE_SET_ENERGY_TOTAL = "set_energy_total"
+
+# Carries a new total from the reset button (button.py) to the accumulating
+# sensor (sensor.py). Suffixed with the airco id so a button only reaches its
+# own device's sensor.
+SIGNAL_SET_ENERGY_TOTAL = f"{DOMAIN}_set_energy_total"
 
 SUPPORT_FLAGS = (
     ClimateEntityFeature.FAN_MODE
