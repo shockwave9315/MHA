@@ -20,6 +20,7 @@ from custom_components.mitsubishi_wf_rac.wfrac import device as device_module
 from custom_components.mitsubishi_wf_rac.wfrac.device import Device
 from custom_components.mitsubishi_wf_rac.wfrac.models.aircon import Aircon
 from custom_components.mitsubishi_wf_rac.wfrac.rac_parser import RacParser
+from custom_components.mitsubishi_wf_rac.wfrac.repository import AirconCommandError
 
 
 @pytest.fixture
@@ -112,6 +113,40 @@ async def test_service_data_write_is_skipped_when_fresh_state_read_fails(
 
     device.update.assert_awaited_once()
     device._api.send_airco_command.assert_not_awaited()
+
+
+async def test_service_data_retry_refreshes_and_skips_after_foreign_change(
+    device, monkeypatch
+):
+    """A remote/app change during the retry delay must never be overwritten."""
+    monkeypatch.setattr(
+        device_module, "SERVICE_DATA_REQUEST_OFFSET", timedelta(milliseconds=0)
+    )
+    monkeypatch.setattr(
+        device_module, "SERVICE_DATA_RETRY_DELAY", timedelta(milliseconds=0)
+    )
+
+    refresh_count = 0
+
+    async def _refresh_state():
+        nonlocal refresh_count
+        refresh_count += 1
+        # First refresh is the snapshot for the initial service-data write.
+        # The retry refresh then sees a change from the physical unit/IR remote.
+        device._updated_by = "local" if refresh_count == 1 else "aircon"
+        return True
+
+    device.update = AsyncMock(side_effect=_refresh_state)
+    device.set_airco = AsyncMock(
+        side_effect=AirconCommandError("HTTP 501: Not supported this command")
+    )
+
+    await device._async_request_service_data()
+
+    assert device.update.await_count == 2
+    # Only the first write is attempted. The retry refresh catches the foreign
+    # change and aborts before another full-state setAirconStat can overwrite it.
+    assert device.set_airco.await_count == 1
 
 
 async def test_missing_service_field_expires_independently(device):
