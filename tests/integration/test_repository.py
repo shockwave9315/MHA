@@ -83,19 +83,21 @@ async def test_http_error_status_raises_command_error(repository):
 
 
 async def test_connection_failure_raises_connection_error(repository):
-    cause = ClientConnectionError("connection refused")
-    repo, _ = repository([cause])
+    first = ClientConnectionError("http refused")
+    second = ClientConnectionError("https refused")
+    repo, _ = repository([first, second])
     with pytest.raises(AirconConnectionError) as error:
         await repo.get_aircon_stats("airco-id")
-    assert error.value.__cause__ is cause
+    assert error.value.__cause__ is second
 
 
 async def test_timeout_raises_connection_error(repository):
-    cause = asyncio.TimeoutError()
-    repo, _ = repository([cause])
+    first = asyncio.TimeoutError()
+    second = asyncio.TimeoutError()
+    repo, _ = repository([first, second])
     with pytest.raises(AirconConnectionError) as error:
         await repo.get_aircon_stats("airco-id")
-    assert error.value.__cause__ is cause
+    assert error.value.__cause__ is second
 
 
 async def test_refused_command_keeps_the_discovered_method(repository):
@@ -118,9 +120,15 @@ async def test_refused_command_keeps_the_discovered_method(repository):
 
 
 async def test_rediscovery_tries_the_last_working_method_first(repository):
-    """Recovery must not put an HTTPS unit behind an HTTP-first timeout."""
+    """A real outage may fail both schemes; the next discovery must still try
+    the last successful HTTPS method before falling back to HTTP.
+    """
     repo, session = repository(
-        [ClientConnectionError("boom"), _FakeResponse(200, _OK_BODY)],
+        [
+            ClientConnectionError("https down"),
+            ClientConnectionError("http down"),
+            _FakeResponse(200, _OK_BODY),
+        ],
         method="https",
     )
     repo._ssl_context = ssl.create_default_context()
@@ -133,6 +141,7 @@ async def test_rediscovery_tries_the_last_working_method_first(repository):
     assert repo.method == "https"
     assert session.urls == [
         "https://127.0.0.1:51443/beaver/command/getAirconStat",
+        "http://127.0.0.1:51443/beaver/command/getAirconStat",
         "https://127.0.0.1:51443/beaver/command/getAirconStat",
     ]
 
@@ -140,28 +149,21 @@ async def test_rediscovery_tries_the_last_working_method_first(repository):
 @pytest.mark.parametrize(
     ("old_method", "new_method"), (("http", "https"), ("https", "http"))
 )
-async def test_rediscovery_recovers_after_a_protocol_change(
+async def test_stale_persisted_protocol_recovers_in_the_same_call(
     repository, old_method, new_method
 ):
-    """The alternative remains reachable if a firmware line changes protocol."""
+    """A stale ConfigEntry method must not wedge every Home Assistant setup retry."""
     repo, session = repository(
-        [
-            ClientConnectionError("unit offline"),
-            ClientConnectionError("old protocol refused"),
-            _FakeResponse(200, _OK_BODY),
-        ],
+        [ClientConnectionError("stale protocol"), _FakeResponse(200, _OK_BODY)],
         method=old_method,
     )
     repo._ssl_context = ssl.create_default_context()
 
-    with pytest.raises(AirconConnectionError):
-        await repo.get_aircon_stats("airco-id")
+    result = await repo.get_aircon_stats("airco-id")
 
-    await repo.get_aircon_stats("airco-id")
-
+    assert result == {"airconId": "airco-id"}
     assert repo.method == new_method
     assert session.urls == [
-        f"{old_method}://127.0.0.1:51443/beaver/command/getAirconStat",
         f"{old_method}://127.0.0.1:51443/beaver/command/getAirconStat",
         f"{new_method}://127.0.0.1:51443/beaver/command/getAirconStat",
     ]
