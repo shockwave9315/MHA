@@ -223,7 +223,9 @@ class Repository:
                 _LOGGER.debug("Waiting for %rs until we can send a request", wait_for)
                 await asyncio.sleep(wait_for)
 
-            # If we already know how to communicate with the unit, proceed
+            stale_method: str | None = None
+
+            # If we already know how to communicate with the unit, proceed.
             if self._method in ("http", "https"):
                 try:
                     json_response = await _execute_request(self._method)
@@ -234,51 +236,78 @@ class Repository:
                     # request an extra discovery round trip for nothing.
                     raise
                 except AirconConnectionError:
-                    # A transport outage may mean either that the unit is down
-                    # or that its firmware now uses the other protocol. Clear
-                    # the active method so rediscovery remains possible, while
-                    # retaining it as the preferred first attempt below. This
-                    # lets an unchanged HTTPS unit recover without getting
-                    # stuck on an HTTP-first discovery attempt.
-                    self._preferred_method = self._method
+                    # A persisted method can be stale after a firmware/protocol
+                    # change. Setup retries recreate Repository from the same
+                    # ConfigEntry, so merely clearing _method and raising would
+                    # wedge every retry on the same stale value. Remember the
+                    # old protocol as the future preference, but probe the
+                    # alternate transport in this same call.
+                    stale_method = self._method
+                    self._preferred_method = stale_method
                     self._method = None
-                    raise
 
-            # If we haven't yet determined if https is required, find out
-            else:
-                _LOGGER.debug("No stored method; attempting discovery...")
-                methods = (
-                    (self._preferred_method,)
-                    if self._preferred_method in ("http", "https")
-                    else ()
-                )
-                methods += tuple(
-                    method for method in ("http", "https") if method not in methods
-                )
-
-                # Fall back on any API error, command errors included: a unit
-                # can answer the wrong protocol with a status code rather than
-                # dropping the connection, which still means "try the other
-                # one".
-                for index, method in enumerate(methods):
-                    try:
-                        json_response = await _execute_request(method)
-                    except AirconApiError:
-                        if index == len(methods) - 1:
-                            raise
-                        _LOGGER.debug(
-                            "%s failed, trying %s",
-                            method.upper(),
-                            methods[index + 1].upper(),
-                        )
-                        continue
-
+            if self._method not in ("http", "https"):
+                if stale_method is not None:
+                    alternate_method = "https" if stale_method == "http" else "http"
                     _LOGGER.info(
-                        "Discovered working communication method: %s", method.upper()
+                        "Request with stored method %r failed; trying %s",
+                        stale_method,
+                        alternate_method.upper(),
                     )
-                    self._method = method
-                    self._preferred_method = method
-                    break
+                    try:
+                        json_response = await _execute_request(alternate_method)
+                    except AirconCommandError:
+                        # The alternate transport answered, so it is valid even
+                        # if this particular command was refused.
+                        self._method = alternate_method
+                        self._preferred_method = alternate_method
+                        raise
+                    except AirconConnectionError:
+                        # Neither transport answered. Leave the active method
+                        # unset, but retain the last successful one as the
+                        # preferred first candidate for the next discovery.
+                        raise
+                    else:
+                        self._method = alternate_method
+                        self._preferred_method = alternate_method
+                        _LOGGER.info(
+                            "Recovered communication method: %s",
+                            alternate_method.upper(),
+                        )
+                else:
+                    _LOGGER.debug("No stored method; attempting discovery...")
+                    methods = (
+                        (self._preferred_method,)
+                        if self._preferred_method in ("http", "https")
+                        else ()
+                    )
+                    methods += tuple(
+                        method for method in ("http", "https") if method not in methods
+                    )
+
+                    # Fall back on any API error, command errors included: a unit
+                    # can answer the wrong protocol with a status code rather than
+                    # dropping the connection, which still means "try the other
+                    # one".
+                    for index, method in enumerate(methods):
+                        try:
+                            json_response = await _execute_request(method)
+                        except AirconApiError:
+                            if index == len(methods) - 1:
+                                raise
+                            _LOGGER.debug(
+                                "%s failed, trying %s",
+                                method.upper(),
+                                methods[index + 1].upper(),
+                            )
+                            continue
+
+                        _LOGGER.info(
+                            "Discovered working communication method: %s", method.upper()
+                        )
+                        self._method = method
+                        self._preferred_method = method
+                        break
 
             self._next_request_after = datetime.now() + MIN_TIME_BETWEEN_REQUESTS
 
