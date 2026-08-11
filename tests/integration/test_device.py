@@ -507,7 +507,6 @@ async def test_availability_recovers_and_resets_the_failure_count(hass):
     assert dev.available is False
 
 
-
 # --- firmware update check (wfrac/firmware_check.py) ----------------------
 
 
@@ -912,7 +911,7 @@ async def test_async_update_data_counts_timeouts_as_connection_failures(
 
 async def test_service_data_is_carried_forward_between_polls(device):
     device._airco.CompressorFrequency = 40.0
-    device._last_service_data_response = datetime.now()
+    device._last_service_data_response = {"CompressorFrequency": datetime.now()}
     new_airco = Aircon()
 
     device._carry_forward_service_data(new_airco)
@@ -929,7 +928,11 @@ async def test_unconvertible_coil_reading_is_not_carried_forward(device):
     """
     device._airco.IndoorCoilTemp = 37.5
     device._airco.IndoorCoilRaw = 119
-    device._last_service_data_response = datetime.now()
+    now = datetime.now()
+    device._last_service_data_response = {
+        "IndoorCoilTemp": now,
+        "IndoorCoilRaw": now,
+    }
     new_airco = Aircon()
     new_airco.IndoorCoilRaw = 252  # arrived, but off the end of the table
 
@@ -945,7 +948,11 @@ async def test_missing_coil_segment_is_still_carried_forward(device):
     """
     device._airco.IndoorCoilTemp = 21.5
     device._airco.IndoorCoilRaw = 88
-    device._last_service_data_response = datetime.now()
+    now = datetime.now()
+    device._last_service_data_response = {
+        "IndoorCoilTemp": now,
+        "IndoorCoilRaw": now,
+    }
     new_airco = Aircon()
     new_airco.CompressorFrequency = 40.0  # some other segment did arrive
 
@@ -960,9 +967,10 @@ async def test_service_data_expires_when_nothing_fresh_arrives(device):
     reporting a frozen value that looks live.
     """
     device._airco.CompressorFrequency = 40.0
-    device._last_service_data_response = datetime.now() - (
-        device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1)
-    )
+    device._last_service_data_response = {
+        "CompressorFrequency": datetime.now()
+        - (device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1))
+    }
     new_airco = Aircon()
 
     device._carry_forward_service_data(new_airco)
@@ -970,20 +978,25 @@ async def test_service_data_expires_when_nothing_fresh_arrives(device):
     assert new_airco.CompressorFrequency is None
 
 
-async def test_fresh_service_data_restarts_the_clock(device):
+async def test_fresh_service_field_does_not_restart_other_fields_clock(device):
     device._airco.CompressorFrequency = 40.0
     device._airco.HotGasTemp = 50.0
-    device._last_service_data_response = datetime.now() - (
+    old = datetime.now() - (
         device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1)
     )
+    device._last_service_data_response = {
+        "CompressorFrequency": old,
+        "HotGasTemp": old,
+    }
     new_airco = Aircon()
-    new_airco.CompressorFrequency = 45.0  # this poll carried the segments
+    new_airco.CompressorFrequency = 45.0
 
     device._carry_forward_service_data(new_airco)
 
     assert new_airco.CompressorFrequency == 45.0
-    # The rest of the block comes with it, so they are carried again.
-    assert new_airco.HotGasTemp == 50.0
+    # A live compressor-frequency segment must not make a missing, expired hot
+    # gas segment look current.
+    assert new_airco.HotGasTemp is None
 
 
 async def test_expiring_service_data_warns_once_and_reports_the_recovery(
@@ -992,9 +1005,10 @@ async def test_expiring_service_data_warns_once_and_reports_the_recovery(
     """The refusals themselves are routine; running out of values is not."""
     caplog.set_level("DEBUG", logger=device_module.__name__)
     device._airco.CompressorFrequency = 40.0
-    device._last_service_data_response = datetime.now() - (
-        device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1)
-    )
+    device._last_service_data_response = {
+        "CompressorFrequency": datetime.now()
+        - (device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1))
+    }
 
     for _ in range(3):
         device._carry_forward_service_data(Aircon())
