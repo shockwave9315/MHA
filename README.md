@@ -108,8 +108,10 @@ The unit's own frost-protection/low-power standby mode for when nobody's home, w
 | Entity | Values | Description |
 |---|---|---|
 | Home Leave Mode (select) | `off`, `away_cool`, `away_heat` | Enters/leaves Home Leave mode in either direction. |
-| Home Leave Cooling/Heating Temp Rule *(number, disabled by default)* | 10–50 °C | Outdoor/room temperature threshold at which Home Leave engages for that mode. |
-| Home Leave Cooling/Heating Temp Setting *(number, disabled by default)* | 10–50 °C | Target temperature while Home Leave is active for that mode. |
+| Home Leave Cooling Temp Rule *(number, disabled by default)* | 10–50 °C | Outdoor/room temperature threshold at which cooling Home Leave engages. |
+| Home Leave Heating Temp Rule *(number, disabled by default)* | -20–30 °C | Outdoor/room temperature threshold at which heating Home Leave engages. |
+| Home Leave Cooling Temp Setting *(number, disabled by default)* | 10–50 °C | Target temperature while cooling Home Leave is active. |
+| Home Leave Heating Temp Setting *(number, disabled by default)* | 0–30 °C | Target temperature while heating Home Leave is active. |
 | Home Leave Cooling/Heating Airflow *(select, disabled by default)* | `auto`, `1`–`4` | Fan speed while Home Leave is active for that mode. |
 
 The number/select entities above stay `unknown` until the climate entity's "Request Home Leave Mode status" action has been called once - the unit omits these values from a plain poll otherwise. Writing to them before that is refused rather than guessed at. See the `request_home_leave_mode_status`/`set_home_leave_mode` climate actions.
