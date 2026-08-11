@@ -406,6 +406,16 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
                 if attempt == 1:
                     _LOGGER.debug("Service data request refused (%s); retrying", ex)
                     await asyncio.sleep(SERVICE_DATA_RETRY_DELAY.total_seconds())
+                    # The retry is another full-state write. Five seconds is
+                    # plenty of time for a remote/app/panel change, so refresh
+                    # again instead of rebuilding from the snapshot used by the
+                    # refused first attempt. If this read fails, skip the
+                    # optional diagnostics cycle rather than writing stale
+                    # state; likewise skip once when a foreign change is seen.
+                    if not await self.update():
+                        return
+                    if self._skip_service_data_after_foreign_change():
+                        return
                     continue
                 # Debug, not a warning: the module refuses these requests
                 # transiently and a single skipped cycle changes nothing the
