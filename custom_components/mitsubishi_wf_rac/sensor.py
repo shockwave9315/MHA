@@ -31,6 +31,7 @@ from homeassistant.const import (
 from homeassistant.helpers import entity_registry as er
 
 from .entity import WfRacEntity
+from .target_offset import resolve_target_offset_from_operation
 from .wfrac.device import Device
 from .const import (
     ATTR_TARGET_TEMPERATURE,
@@ -61,7 +62,6 @@ from .const import (
     ATTR_COOL_HOT_JUDGE,
     CONF_INDOOR_OFFSET,
     CONF_OUTDOOR_OFFSET,
-    CONF_TARGET_OFFSET,
     CONF_SERVICE_DATA,
     SERVICE_SET_ENERGY_TOTAL,
     SIGNAL_SET_ENERGY_TOTAL,
@@ -307,9 +307,11 @@ class TemperatureSensor(WfRacEntity, SensorEntity):
             outdoor_offset = self._device.config_entry.options.get(CONF_OUTDOOR_OFFSET, 0.0)
             self._attr_native_value = self._device.airco.OutdoorTemp + outdoor_offset
         elif self._custom_type == ATTR_TARGET_TEMPERATURE:
-            # Kept symmetric with climate.py's target_temperature - see the
-            # comment in ClimateEntity._update_state().
-            target_offset = self._device.config_entry.options.get(CONF_TARGET_OFFSET, 0.0)
+            # Use the exact same mode-aware resolver as climate.py so the
+            # optional target sensor cannot disagree with the climate entity.
+            target_offset = resolve_target_offset_from_operation(
+                self._device.config_entry.options, self._device.airco.OperationMode
+            )
             self._attr_native_value = self._device.airco.PresetTemp + target_offset
 
 
@@ -419,10 +421,15 @@ class EnergyTotalSensor(WfRacEntity, RestoreSensor):
         raw = self._device.airco.Electric
         if raw is None:
             return
-        # Only upward steps count; a drop means the unit was switched on and
-        # started a new run, and what came before is already in the total.
-        if self._last_raw is not None and raw > self._last_raw:
-            self._total += raw - self._last_raw
+        if self._last_raw is not None:
+            if raw >= self._last_raw:
+                # Normal progression inside one run.
+                self._total += raw - self._last_raw
+            else:
+                # The unit reset its per-run counter. The first poll of the new
+                # run may already be non-zero; count that reading instead of
+                # dropping it while merely re-anchoring.
+                self._total += raw
         self._last_raw = raw
         self._attr_native_value = round(self._total, 2)
 
