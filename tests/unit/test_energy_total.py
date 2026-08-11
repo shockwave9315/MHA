@@ -2,9 +2,10 @@
 
 The unit's own kWh counter is per run: it counts up while the indoor unit
 runs, holds its value while the unit is off, and is cleared to 0 at the next
-power-on. EnergyTotalSensor turns that into a lifetime figure by summing only
-the upward steps. The sequences below are taken from a real two-day recorder
-history of two units, resets included.
+power-on. EnergyTotalSensor turns that into a lifetime figure by summing the
+increments within each run and the first observed value after a reset. The
+sequences below are taken from a real two-day recorder history of two units,
+resets included.
 
 Only _update_state()/async_set_total() are exercised, on an instance built
 without HA's entity machinery - both touch nothing but the four attributes
@@ -52,8 +53,13 @@ def test_sums_upward_steps(sensor: EnergyTotalSensor) -> None:
 
 
 def test_reset_to_zero_is_not_counted_as_consumption(sensor: EnergyTotalSensor) -> None:
-    """A drop means a new run started; what came before is already counted."""
+    """A zero reset starts a new run; what came before is already counted."""
     assert _feed(sensor, [0.0, 0.25, 0.5, 0.0, 0.25]) == 0.75
+
+
+def test_first_nonzero_reading_after_reset_is_counted(sensor: EnergyTotalSensor) -> None:
+    """The first poll of a new run often arrives after energy was already used."""
+    assert _feed(sensor, [0.0, 0.25, 0.5, 0.1, 0.25]) == 0.75
 
 
 def test_value_held_while_unit_is_off(sensor: EnergyTotalSensor) -> None:

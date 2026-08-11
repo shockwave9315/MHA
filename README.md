@@ -50,18 +50,30 @@ This integration creates one device per airco with the following entities.
 | | `fan_mode` | `auto`, `quiet`, `low`, `medium`, `high` | Fan speed. |
 | | `swing_mode` | `up_down_auto`, `highest`, `middle`, `normal`, `lowest`, `3d_auto` | Vertical louver position. `3d_auto` hands vertical *and* horizontal swing over to the unit's own automatic mode. |
 | | `swing_horizontal_mode` | `left_right_auto`, `left_left`, `left_center`, `center_center`, `center_right`, `right_right`, `left_right`, `right_left`, `3d_auto` | Horizontal louver position. `3d_auto` behaves as above. |
-| | `target_temperature` | 16–30 °C (cool), 18–30 °C (other modes) | Setpoint. Cooling accepts a lower minimum than heating/auto/dry in practice; heating below 18 °C isn't a reliable plain setpoint (see the Home Leave switch for that instead). |
+| | `target_temperature` | 16–30 °C (cool), 18–30 °C (other modes) | Setpoint. Cooling accepts a lower minimum than heating/auto/dry in practice; heating below 18 °C isn't a reliable plain setpoint (see Home Leave Mode for that instead). |
 | | `current_temperature` | °C | Indoor temperature as measured by the unit, corrected by the "Indoor Temp. Sensor Offset" option if set. |
-| | `hvac_action` | `off`, `idle`, `cooling`, `heating`, `drying`, `fan` | What the unit is actually doing right now. In `auto` mode this reflects the unit's own cool/heat decision, not just the configured mode. |
+| | `hvac_action` | `off`, `idle`, `cooling`, `heating`, `drying`, `fan` | What the unit is actually doing right now. `idle` means the unit is on but the compressor is stopped (e.g. setpoint satisfied) - same signal as the Compressor Demand binary sensor below. In `auto` mode, `cooling`/`heating` reflects the unit's own cool/heat decision, not just the configured mode. |
 
 ## Sensors
 
 | Entity | Values | Description |
 |---|---|---|
 | Indoor Temperature | °C | Same value as the climate entity's `current_temperature`, exposed as its own sensor. |
-| Outdoor Temperature | °C | Outdoor unit temperature, corrected by the "Outdoor Temp. Sensor Offset" option if set. |
-| Target Temperature | °C | Current setpoint, exposed as its own sensor. |
-| Energy Usage | kWh, increasing | Cumulative energy consumption reported by the unit. Only created if the unit actually reports this value — not all models do. |
+| Outdoor Temperature *(shared on multi-split)* | °C | Outdoor unit temperature, corrected by the "Outdoor Temp. Sensor Offset" option if set. On multi-split systems this is an outdoor-unit-level value - reads identically on every indoor unit sharing one outdoor unit, since there's only one outdoor sensor. |
+| Target Temperature *(disabled by default)* | °C | Current setpoint, exposed as its own sensor. Off by default because the climate entity already carries the same value as its `target_temperature` attribute. |
+| Energy Usage (current run) | kWh, increasing | Energy consumption of the **current run**, as reported by the unit. The unit clears this counter to 0 every time it is switched on, and holds the last value while it is off — so a low or zero reading is normal, not a fault. For a lifetime figure use Energy Usage Total below. Only created if the unit actually reports this value — not all models do. |
+| Energy Usage Total | kWh, increasing | Lifetime total, accumulated by the integration from the counter above and kept across restarts. This is the one to put on the Energy dashboard. Reset it with the "Reset Energy Usage Total" button on the device page, or set it to a specific value with the `mitsubishi_wf_rac.set_energy_total` action (useful when carrying a figure over from an existing meter). Resetting it does not erase the history already recorded in Home Assistant's long-term statistics. |
+| Compressor Frequency *(diagnostic, only with Service Data on, shared on multi-split)* | Hz | Actual compressor speed, not just on/off. Only exists while the "Service Data" option below is on. Outdoor-unit-level - identical on every indoor unit sharing one outdoor unit. On older firmware (`mcu131`/`wireless010`) this reads a constant 0 even with the compressor confirmed running ([#207](https://github.com/blues-sechseck/Mitsubishi-WF-RAC-Integration/issues/207)). |
+| Operating Current *(diagnostic, only with Service Data on, shared on multi-split)* | A | Compressor operating current. Same "Service Data" requirement as above, the same outdoor-unit-level sharing as Compressor Frequency, and the same constant-0 reading on older firmware ([#207](https://github.com/blues-sechseck/Mitsubishi-WF-RAC-Integration/issues/207)). |
+| Hot Gas Temperature *(diagnostic, only with Service Data on, shared on multi-split)* | °C | Compressor discharge (hot gas) temperature. Same "Service Data" requirement as above, and the same outdoor-unit-level sharing as Compressor Frequency. |
+| EEV Pulses *(diagnostic, only with Service Data on)* | pulses | Electronic expansion valve position, raw pulse count (0-255). Same "Service Data" requirement as above. |
+| EEV Position *(diagnostic, only with Service Data on)* | % | Same value as EEV Pulses, linearly mapped to 0-255=0-100%. The real full-open pulse count is unknown, so treat this as relative, not calibrated - useful for comparing indoor units on the same system. Same "Service Data" requirement as above. |
+| Indoor Coil Temperature *(diagnostic, only with Service Data on)* | °C | Indoor heat-exchanger temperature (MHI's THI-R1). Per indoor unit, not shared. In cooling it drops as the coil gets cold and rises back to room temperature once the compressor stops - the clearest signal there is for what the unit is actually doing. In heating the coil runs past the calibrated range and this reads unknown - the raw sensor below still reports. Same "Service Data" requirement as above. |
+| Indoor Coil Outlet Temperature *(diagnostic, only with Service Data on)* | °C | Indoor heat-exchanger outlet, on the suction side (MHI's THI-R3). Also per indoor unit. Equal to Indoor Coil Temperature while the compressor is off; the difference between the two while it runs is the evaporator superheat. Same "Service Data" requirement as above. |
+| Indoor Coil Sensor (raw), Indoor Coil Outlet Sensor (raw) *(diagnostic, disabled by default, only with Service Data on)* | *(none)* | The bytes the two temperatures above are converted from. The conversion is only anchored over the range a cooling coil uses, so in heating the temperatures read unknown while these keep reporting. Off by default - enable them if you want to help calibrate the rest of the curve against a thermometer on the coil. |
+| Outdoor Coil Sensor (raw) *(diagnostic, disabled by default, only with Service Data on, shared on multi-split)* | *(none)* | Raw byte from the outdoor heat-exchanger sensor (MHI's THO-R1), outdoor-unit-level. Deliberately unconverted: the value clearly tracks the outdoor coil, but its scale is not the one the two indoor coil sensors use and no conversion is known, so calling it degrees would be a guess. |
+| Discharge Superheat (raw) *(diagnostic, disabled by default, only with Service Data on, shared on multi-split)* | *(none)* | Raw byte for MHI's TDSH. Reads a constant 0 on both test units, so it may not be served by every model - it is exposed so anyone whose unit does report it can say so. |
+| Protection Number (raw) *(diagnostic, disabled by default, only with Service Data on, shared on multi-split)* | *(none)* | Raw byte for the outdoor unit's protection number, the code behind a protective throttle or stop. Whether any module answers this one at all is untested; if yours stays unknown, it does not. |
 | Airco ID *(diagnostic)* | text | Internal ID of the airco. |
 | Operator ID *(diagnostic, disabled by default)* | text | Internal operator/account ID. |
 | Device ID *(diagnostic, disabled by default)* | text | Internal device ID. |
@@ -70,7 +82,7 @@ This integration creates one device per airco with the following entities.
 | Error *(diagnostic)* | error code | Raw error code reported by the unit; `00` means no error. |
 | Updated By *(diagnostic)* | text | Which account last changed the unit's settings (this integration or the Smart M-Air app). |
 | Account Expires *(diagnostic)* | text | Expiry of the current operator session. |
-| LED Status *(diagnostic)* | text | State of the unit's status LED. |
+| LED Status *(diagnostic, disabled by default)* | text | State of the unit's status LED. |
 | Auto Heating *(diagnostic)* | text | State of the unit's automatic heating assist. |
 | Model Nr *(diagnostic, disabled by default)* | number | Raw model-identifier byte reported by the unit. Used to gate which optional features (occupancy, Home Leave) are exposed; mostly useful for diagnosing unsupported models. |
 | Cool Hot Judge *(diagnostic, disabled by default)* | `cooling`, `heating` | Raw cool/heat state reported by the unit's compressor, independent of the configured mode. `unknown` while off or in `fan_only`. Useful for detecting the "wait/hold" state on multi-split systems where one indoor unit is blocked because the outdoor unit is already committed to the opposite mode for a sibling unit. |
@@ -79,14 +91,30 @@ This integration creates one device per airco with the following entities.
 
 | Entity | Values | Description |
 |---|---|---|
-| Problem | on/off | On whenever the unit reports an error code (`error_code` attribute holds the raw code). |
-| Occupancy | on/off | Only created on units that report the "Vacant"/Home Leave bit (see the Home Leave switch below). This is *not* a physical presence/motion sensor - it just mirrors that bit, which is off unless Home Leave mode was actually entered (e.g. via the Home Leave switch). It will read "occupied" even in an empty room if Home Leave was never triggered. |
+| Problem | on/off | On whenever the unit reports an error code (`error_code` attribute holds the raw code; `error_description` is added when the code is documented in the MHI service/user manuals). |
+| Occupancy | on/off | Only created on units that report the "Vacant"/Home Leave bit (see Home Leave Mode below). This is *not* a physical presence/motion sensor - it just mirrors that bit, which is off unless Home Leave mode was actually entered. It will read "occupied" even in an empty room if Home Leave was never triggered. |
+| Compressor Demand | on/off | Whether *this* indoor unit is currently calling for the compressor, as opposed to just being powered on (e.g. off while a setpoint is already satisfied). Comes from the same status poll as every other sensor - no extra request needed. On a single-split system that is the same thing as the compressor running. On a multi-split it is not: each indoor unit reports its own demand, so one can read "on" while a sibling on the same outdoor unit reads "off" at the same moment, and this sensor can go "off" while the shared compressor keeps running for the sibling. To tell whether the outdoor unit is running at all, either check this sensor across every indoor unit, or use Compressor Frequency, which is identical across all indoor units sharing one outdoor unit. |
 
-## Switch
+## Update
 
 | Entity | Values | Description |
 |---|---|---|
-| Home Leave Mode | on/off | Enters/leaves the unit's own frost-protection/low-power standby mode for when nobody's home, by lowering the heat target temperature below the unit's Home Leave threshold. Only created on units confirmed to support it. |
+| Firmware Update *(opt-in)* | on/off | Reports whether newer WF-RAC module firmware is available, by comparing the version reported locally against the manufacturer's `getFirmware` endpoint. Only created if "Check for firmware updates" is enabled in the integration's options - off by default, since it's the only call this integration makes outside the local network. Read-only; installing an update isn't offered here. |
+
+## Home Leave Mode
+
+The unit's own frost-protection/low-power standby mode for when nobody's home, with independent cooling and heating away-targets. Only created on units confirmed to support it.
+
+| Entity | Values | Description |
+|---|---|---|
+| Home Leave Mode (select) | `off`, `away_cool`, `away_heat` | Enters/leaves Home Leave mode in either direction. |
+| Home Leave Cooling Temp Rule *(number, disabled by default)* | 10–50 °C | Outdoor/room temperature threshold at which cooling Home Leave engages. |
+| Home Leave Heating Temp Rule *(number, disabled by default)* | -20–30 °C | Outdoor/room temperature threshold at which heating Home Leave engages. |
+| Home Leave Cooling Temp Setting *(number, disabled by default)* | 10–50 °C | Target temperature while cooling Home Leave is active. |
+| Home Leave Heating Temp Setting *(number, disabled by default)* | 0–30 °C | Target temperature while heating Home Leave is active. |
+| Home Leave Cooling/Heating Airflow *(select, disabled by default)* | `auto`, `1`–`4` | Fan speed while Home Leave is active for that mode. |
+
+The number/select entities above stay `unknown` until the climate entity's "Request Home Leave Mode status" action has been called once - the unit omits these values from a plain poll otherwise. Writing to them before that is refused rather than guessed at. See the `request_home_leave_mode_status`/`set_home_leave_mode` climate actions.
 
 ## Select (optional)
 
@@ -105,13 +133,14 @@ Configurable via the integration's "Configure" (options) flow.
 | Option | Range | Description |
 |---|---|---|
 | Host (IP) address | IP or hostname | Address of the WF-RAC module. |
-| Check availability | on/off, on by default | Whether a failed poll is tolerated before the device is marked unavailable. Off marks it unavailable on the first failed poll. |
-| Retry limit | 2 or higher, default 3 | Consecutive failed polls before the device is marked unavailable. At the 60 s poll interval, `3` is about 3 minutes. `0` and `1` mark it unavailable on the first failed poll, identical to Check availability being off. |
+| Retry limit | 3 or higher, default 3 | Consecutive failed polls before the device is marked unavailable. At the 60 s poll interval, `3` is about 3 minutes - enough to ride through the module's hourly WiFi reassociation. Raise it on a weak link; it cannot be set lower. |
 | Indoor Temp. Sensor Offset | -15..15 °C | Added to the unit's own indoor-sensor reading before it's shown as `current_temperature` / the Indoor Temperature sensor - display-only, doesn't change what the unit does. |
 | Outdoor Temp. Sensor Offset | -15..15 °C | Same, for the Outdoor Temperature sensor. |
 | Target Temp. Offset | -5..5 °C | Calibrates the *setpoint sent to the unit* - see "Target Temp. Offset sign convention" below. Applies to every `hvac_mode` unless overridden by the two options below. |
 | Target Temp. Offset (Cooling) | -5..5 °C, unset by default | Overrides Target Temp. Offset for `cool` and `dry` mode. Leave unset to keep using Target Temp. Offset for those modes too. |
 | Target Temp. Offset (Heating) | -5..5 °C, unset by default | Overrides Target Temp. Offset for `heat` mode. Leave unset to keep using Target Temp. Offset for `heat` too. |
+| Check for firmware updates | on/off, off by default | Creates the Firmware Update entity (see Update above) and periodically checks the manufacturer's `getFirmware` endpoint. The only outbound internet call this integration makes - leave off to stay fully local. |
+| Service Data | on/off, off by default | Requests the operation data once per poll - compressor frequency and current, discharge and coil temperatures, EEV position, and the raw bytes behind them - and creates the matching sensors listed above; turning it off removes them again. Unlike every other request this integration sends, this one is a *write* that the read request rides on, because the protocol offers no way to ask for these values on their own. The write carries the unit's complete state, so that state is re-read immediately beforehand and any change made at the unit is picked up rather than overwritten. Leave it off unless you want these values. |
 
 ### Target Temp. Offset sign convention
 
@@ -134,12 +163,14 @@ interface does "connect / disconnect every one hour … to avoid too much cache 
 ([source](https://community.ui.com/questions/AC-Units-IOT-disconnecting-from-UniFi-Wi-Fi-at-regular-hourly-Intervals/821cd3e4-46a0-4d6b-8fd0-8d5cf182b90f)).
 The reassociation takes seconds to about a minute and cannot be turned off.
 
-This integration polls every 60 seconds, so a reassociation can cost a poll. The availability
-options decide whether that becomes a visible outage:
+This integration polls every 60 seconds, so a reassociation can cost a poll. That does not become a
+visible outage: the device is only reported unavailable after three consecutive failed polls, about
+three minutes, which rides through the reassociation. If your link is weak enough that this still
+shows up, raise **Retry limit** in the options; three is the minimum, not a target.
 
-- **Check availability**: on (the default).
-- **Retry limit**: `3` (the default) — the device is marked unavailable after 3 consecutive failed
-  polls, about 3 minutes. `0` and `1` mark it unavailable on the first failed poll.
+A missed poll is not logged as a warning either — it is a debug line, and the log only speaks up
+when the device actually crosses the threshold and again when it comes back. Turn on debug logging
+for `custom_components.mitsubishi_wf_rac` if you want to watch the individual polls.
 
 ## Unit goes unavailable for about an hour
 
@@ -162,6 +193,17 @@ problem: the module mishandles WiFi roaming and steering management frames. Reco
 - On UniFi, "Force WiFi 4 Mode" and "DTIM Interval Lock" under IoT Optimization are safe to enable.
 - Blocking the module's outbound internet access at the router removes these outages in some
   setups; this integration only needs LAN access. The hourly reassociation continues either way.
+
+# Protocol reference
+
+If you are writing your own client against the WF-RAC module — or building a CNS/SPI replacement
+such as an ESP32 running MHI-AC-Ctrl — [**docs/wf-rac-module-reference.md**](docs/wf-rac-module-reference.md)
+documents the interface end to end: mDNS discovery, the HTTPS API and its envelope rules, the
+`airconStat` blob, the 18-byte state block and how it maps onto the CNS/SPI frame, the operation-data
+channel, and what the module deliberately does not forward. Every non-obvious claim carries a
+confidence tag saying whether it was observed on hardware, read out of a firmware image, or inferred.
+
+It is written for people outside this project, so nothing in it assumes Home Assistant.
 
 [installbadge]: https://img.shields.io/badge/dynamic/json?style=for-the-badge&logo=home-assistant&logoColor=ccc&label=usage&suffix=%20installs&cacheSeconds=15600&url=https://analytics.home-assistant.io/custom_integrations.json&query=$.mitsubishi_wf_rac.total
 [installs]: https://analytics.home-assistant.io/

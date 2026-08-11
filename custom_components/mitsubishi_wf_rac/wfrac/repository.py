@@ -36,6 +36,20 @@ REQUEST_TIMEOUT = timedelta(seconds=25)
 
 _REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT.total_seconds())
 
+# The `result` field every response carries, as the official app reads it.
+# Anything not listed is reported by number alone.
+RESULT_CODES: dict[int, str] = {
+    0: "ok",
+    1: "operator id not registered with the unit",
+    2: "the unit's account table is full",
+    10: "internal error in the air conditioner",
+    11: "internal error in the air conditioner",
+    12: "operation prohibited",
+    20: "firmware update required",
+    99: "the unit did not confirm the command within 30s",
+    429: "too many requests",
+}
+
 
 def _create_permissive_ssl_context() -> ssl.SSLContext:
     """Build a permissive SSL context for units without a known certificate.
@@ -102,9 +116,14 @@ class Repository:
         self._device_id = device_id
         self._session = async_get_clientsession(hass)
         self._next_request_after = datetime.now()
+        # Last refusal reported per command, see _report_result_code().
+        self._refused_commands: dict[str, int] = {}
         # Previously-discovered communication method (http/https), if the caller
-        # persisted one from a prior run - skips rediscovery below.
+        # persisted one from a prior run - skips rediscovery below. Keep it as
+        # the preferred method as well: if a transport outage invalidates the
+        # active method, rediscovery must try the last successful one first.
         self._method: str | None = method if method in ("http", "https") else None
+        self._preferred_method = self._method
         self._ssl_context: ssl.SSLContext | None = None
         # Serializes _post() calls so the min-time-between-requests throttle and
         # the method-discovery/reset logic below can't interleave across
@@ -204,67 +223,118 @@ class Repository:
                 _LOGGER.debug("Waiting for %rs until we can send a request", wait_for)
                 await asyncio.sleep(wait_for)
 
-            # If we already know how to communicate with the unit, proceed
+            stale_method: str | None = None
+            stored_command_error: AirconCommandError | None = None
+
+            # If we already know how to communicate with the unit, proceed.
             if self._method in ("http", "https"):
                 try:
                     json_response = await _execute_request(self._method)
-                except AirconCommandError:
-                    # The unit answered, so the stored method is still the
-                    # right one - it just refused this particular command.
-                    # Discarding the method here would cost every later
-                    # request an extra discovery round trip for nothing.
-                    raise
+                except AirconCommandError as ex:
+                    # A write refusal (notably the optional Service Data 501)
+                    # does prove that the transport is alive, so keep the
+                    # current protocol for writes. Read/discovery commands are
+                    # different: some stale plaintext/HTTPS endpoints answer
+                    # the wrong scheme with an HTTP status instead of dropping
+                    # the connection. Probe the alternate transport in that
+                    # case, but keep this original command error to restore if
+                    # the alternate does not actually work.
+                    if command not in ("getDeviceInfo", "getAirconStat"):
+                        raise
+                    stale_method = self._method
+                    stored_command_error = ex
+                    self._preferred_method = stale_method
+                    self._method = None
                 except AirconConnectionError:
-                    # A persisted method can become stale across restarts (for
-                    # example after firmware switches the unit from HTTP to
-                    # HTTPS). Retrying on a fresh ConfigEntry would otherwise
-                    # recreate this Repository with the same stale method on
-                    # every HA setup attempt, so probe the alternate protocol
-                    # now and keep the recovered method on this Device.
-                    failed_method = self._method
-                    alternate_method = "https" if failed_method == "http" else "http"
+                    # A persisted method can be stale after a firmware/protocol
+                    # change. Setup retries recreate Repository from the same
+                    # ConfigEntry, so merely clearing _method and raising would
+                    # wedge every retry on the same stale value. Remember the
+                    # old protocol as the future preference, but probe the
+                    # alternate transport in this same call.
+                    stale_method = self._method
+                    self._preferred_method = stale_method
+                    self._method = None
+
+            if self._method not in ("http", "https"):
+                if stale_method is not None:
+                    alternate_method = "https" if stale_method == "http" else "http"
                     _LOGGER.info(
                         "Request with stored method %r failed; trying %s",
-                        failed_method,
+                        stale_method,
                         alternate_method.upper(),
                     )
                     try:
                         json_response = await _execute_request(alternate_method)
                     except AirconCommandError:
-                        # The alternate transport answered, so it is the valid
-                        # protocol even though this command itself was refused.
+                        if stored_command_error is not None:
+                            # Both transports answered with a status error. We
+                            # have no evidence the persisted method changed, so
+                            # restore it and preserve the original semantic
+                            # error (e.g. an account rejection) for the caller.
+                            self._method = stale_method
+                            self._preferred_method = stale_method
+                            raise stored_command_error
+                        # The old transport was unreachable and the alternate
+                        # one answered, so the alternate transport itself is
+                        # valid even if this command was refused.
                         self._method = alternate_method
+                        self._preferred_method = alternate_method
                         raise
                     except AirconConnectionError:
-                        # Neither transport answered. Forget the hint so a
-                        # later request can perform normal discovery again.
-                        self._method = None
+                        if stored_command_error is not None:
+                            # The stored transport answered while the alternate
+                            # one did not. Restore it and surface the original
+                            # command error so account-recovery behavior remains
+                            # intact instead of misclassifying it as an outage.
+                            self._method = stale_method
+                            self._preferred_method = stale_method
+                            raise stored_command_error
+                        # Neither transport answered. Leave the active method
+                        # unset, but retain the last successful one as the
+                        # preferred first candidate for the next discovery.
                         raise
                     else:
                         self._method = alternate_method
+                        self._preferred_method = alternate_method
                         _LOGGER.info(
                             "Recovered communication method: %s",
                             alternate_method.upper(),
                         )
+                else:
+                    _LOGGER.debug("No stored method; attempting discovery...")
+                    methods = (
+                        (self._preferred_method,)
+                        if self._preferred_method in ("http", "https")
+                        else ()
+                    )
+                    methods += tuple(
+                        method for method in ("http", "https") if method not in methods
+                    )
 
-            # If we haven't yet determined if https is required, find out
-            else:
-                _LOGGER.debug("No stored method; attempting discovery...")
-                try:
-                    # Deliberately falls back on any error, command errors
-                    # included: an HTTPS-only module can answer a plaintext
-                    # request with a status code rather than dropping the
-                    # connection, and that still means "try the other one".
-                    json_response = await _execute_request("http")
-                    _LOGGER.info("Discovered working communication method: HTTP")
-                    # Store the required communication method
-                    self._method = "http"
-                except AirconApiError:
-                    _LOGGER.debug("HTTP failed, trying HTTPS")
-                    json_response = await _execute_request("https")
-                    _LOGGER.info("Discovered working communication method: HTTPS")
-                    # Store the required communication method
-                    self._method = "https"
+                    # Fall back on any API error, command errors included: a unit
+                    # can answer the wrong protocol with a status code rather than
+                    # dropping the connection, which still means "try the other
+                    # one".
+                    for index, method in enumerate(methods):
+                        try:
+                            json_response = await _execute_request(method)
+                        except AirconApiError:
+                            if index == len(methods) - 1:
+                                raise
+                            _LOGGER.debug(
+                                "%s failed, trying %s",
+                                method.upper(),
+                                methods[index + 1].upper(),
+                            )
+                            continue
+
+                        _LOGGER.info(
+                            "Discovered working communication method: %s", method.upper()
+                        )
+                        self._method = method
+                        self._preferred_method = method
+                        break
 
             self._next_request_after = datetime.now() + MIN_TIME_BETWEEN_REQUESTS
 
@@ -273,7 +343,42 @@ class Repository:
             self._hostname,
             json_response,
         )
+        self._report_result_code(command, json_response)
         return json_response
+
+    def _report_result_code(self, command: str, response: dict[str, Any]) -> None:
+        """Say so when the unit answers HTTP 200 and still refuses the command.
+
+        Nothing here changes what the caller does with the response. Which
+        firmware reports which code on success over the local API is not
+        established, and a command wrongly treated as failed would be worse
+        than the silent failure this makes visible - reports of "nothing
+        happens, and nothing in the log" (#212) currently have nothing to go
+        on at all.
+
+        One line per command entering a failing state, like everywhere else in
+        this integration: a unit that answers the same refusal every minute
+        would otherwise fill the log with a message the user has already read.
+        """
+        raw = response.get("result")
+        try:
+            code = int(raw)
+        except (TypeError, ValueError):
+            return
+        if code == 0:
+            self._refused_commands.pop(command, None)
+            return
+        if self._refused_commands.get(command) == code:
+            _LOGGER.debug("Aircon still answers %r with result %s", command, code)
+            return
+        self._refused_commands[command] = code
+        _LOGGER.warning(
+            "Aircon answered %r with result %s (%s) - the request was accepted "
+            "but not carried out",
+            command,
+            code,
+            RESULT_CODES.get(code, "meaning unknown"),
+        )
 
     async def get_info(self) -> dict:
         """Simple command to get aircon details"""

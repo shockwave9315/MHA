@@ -14,9 +14,9 @@ from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv, entity_platform
 
 from .entity import WfRacEntity
+from .target_offset import resolve_target_offset
 from .wfrac.device import Device
 from .wfrac.models.aircon import AirconCommands, HomeLeaveModeSetting
-from .target_offset import resolve_target_offset
 from .const import (
     DOMAIN,
     FAN_MODE_TRANSLATION,

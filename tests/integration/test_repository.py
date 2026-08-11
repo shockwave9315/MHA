@@ -5,7 +5,9 @@ fixture (Repository takes the HA client session from it), hence
 tests/integration/ rather than tests/unit/.
 """
 
+import asyncio
 import json
+import ssl
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +24,7 @@ from custom_components.mitsubishi_wf_rac.wfrac.repository import (
 )
 
 _OK_BODY = json.dumps({"result": 0, "contents": {"airconId": "airco-id"}})
+_COMMAND_OK_BODY = json.dumps({"result": 0, "contents": {"airconStat": "AAA="}})
 
 
 class _FakeResponse:
@@ -51,7 +54,11 @@ class _FakeSession:
 
     def post(self, url: str, **_kwargs):
         self.urls.append(url)
-        outcome = self._outcomes.pop(0) if self._outcomes else _OK_BODY
+        outcome = (
+            self._outcomes.pop(0)
+            if self._outcomes
+            else _FakeResponse(200, _OK_BODY)
+        )
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -75,63 +82,142 @@ def repository(hass):
 
 
 async def test_http_error_status_raises_command_error(repository):
-    repo, _ = repository([_FakeResponse(501, "Not supported this command")])
-    with pytest.raises(AirconCommandError):
-        await repo.get_aircon_stats("airco-id")
-
-
-async def test_connection_failure_raises_connection_error(repository):
     repo, _ = repository(
-        [ClientConnectionError("http boom"), ClientConnectionError("https boom")]
+        [
+            _FakeResponse(501, "Not supported this command"),
+            _FakeResponse(501, "Not supported this command"),
+        ]
     )
-    with pytest.raises(AirconConnectionError):
-        await repo.get_aircon_stats("airco-id")
-
-
-async def test_refused_command_keeps_the_discovered_method(repository):
-    """A 501 means the unit answered - the stored method is still correct, so
-    the next request must not pay for a rediscovery.
-    """
-    repo, session = repository(
-        [_FakeResponse(501, "Not supported this command"), _FakeResponse(200, _OK_BODY)]
-    )
-
     with pytest.raises(AirconCommandError):
         await repo.get_aircon_stats("airco-id")
     assert repo.method == "http"
 
-    await repo.get_aircon_stats("airco-id")
+
+async def test_connection_failure_raises_connection_error(repository):
+    first = ClientConnectionError("http refused")
+    second = ClientConnectionError("https refused")
+    repo, _ = repository([first, second])
+    with pytest.raises(AirconConnectionError) as error:
+        await repo.get_aircon_stats("airco-id")
+    assert error.value.__cause__ is second
+
+
+async def test_timeout_raises_connection_error(repository):
+    first = asyncio.TimeoutError()
+    second = asyncio.TimeoutError()
+    repo, _ = repository([first, second])
+    with pytest.raises(AirconConnectionError) as error:
+        await repo.get_aircon_stats("airco-id")
+    assert error.value.__cause__ is second
+
+
+async def test_refused_write_keeps_the_discovered_method(repository):
+    """A setAirconStat 501 is a command refusal, not protocol discovery."""
+    repo, session = repository(
+        [
+            _FakeResponse(501, "Not supported this command"),
+            _FakeResponse(200, _COMMAND_OK_BODY),
+        ]
+    )
+
+    with pytest.raises(AirconCommandError):
+        await repo.send_airco_command("airco-id", "AAA=")
+    assert repo.method == "http"
+
+    assert await repo.send_airco_command("airco-id", "AAA=") == "AAA="
     assert session.urls == [
-        "http://127.0.0.1:51443/beaver/command/getAirconStat",
-        "http://127.0.0.1:51443/beaver/command/getAirconStat",
+        "http://127.0.0.1:51443/beaver/command/setAirconStat",
+        "http://127.0.0.1:51443/beaver/command/setAirconStat",
     ]
 
 
-async def test_unreachable_unit_resets_the_discovered_method(repository):
-    """If neither stored nor alternate protocol answers, forget the hint."""
+async def test_rediscovery_tries_the_last_working_method_first(repository):
+    """A real outage may fail both schemes; the next discovery must still try
+    the last successful HTTPS method before falling back to HTTP.
+    """
     repo, session = repository(
-        [ClientConnectionError("http down"), ClientConnectionError("https down")]
+        [
+            ClientConnectionError("https down"),
+            ClientConnectionError("http down"),
+            _FakeResponse(200, _OK_BODY),
+        ],
+        method="https",
     )
+    repo._ssl_context = ssl.create_default_context()
 
     with pytest.raises(AirconConnectionError):
         await repo.get_aircon_stats("airco-id")
     assert repo.method is None
+
+    await repo.get_aircon_stats("airco-id")
+    assert repo.method == "https"
     assert session.urls == [
+        "https://127.0.0.1:51443/beaver/command/getAirconStat",
         "http://127.0.0.1:51443/beaver/command/getAirconStat",
         "https://127.0.0.1:51443/beaver/command/getAirconStat",
     ]
 
 
-async def test_stale_persisted_method_recovers_in_same_call(repository):
-    """A stale ConfigEntry protocol must not wedge every HA setup retry."""
+@pytest.mark.parametrize(
+    ("old_method", "new_method"), (("http", "https"), ("https", "http"))
+)
+async def test_stale_persisted_protocol_recovers_in_the_same_call(
+    repository, old_method, new_method
+):
+    """A stale ConfigEntry method must not wedge every Home Assistant setup retry."""
     repo, session = repository(
-        [ClientConnectionError("http stale"), _FakeResponse(200, _OK_BODY)]
+        [ClientConnectionError("stale protocol"), _FakeResponse(200, _OK_BODY)],
+        method=old_method,
     )
+    repo._ssl_context = ssl.create_default_context()
 
     result = await repo.get_aircon_stats("airco-id")
 
     assert result == {"airconId": "airco-id"}
-    assert repo.method == "https"
+    assert repo.method == new_method
+    assert session.urls == [
+        f"{old_method}://127.0.0.1:51443/beaver/command/getAirconStat",
+        f"{new_method}://127.0.0.1:51443/beaver/command/getAirconStat",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("old_method", "new_method"), (("http", "https"), ("https", "http"))
+)
+async def test_stale_persisted_protocol_recovers_after_read_status_error(
+    repository, old_method, new_method
+):
+    """The wrong scheme can answer with HTTP 4xx instead of disconnecting."""
+    repo, session = repository(
+        [_FakeResponse(400, "wrong transport"), _FakeResponse(200, _OK_BODY)],
+        method=old_method,
+    )
+    repo._ssl_context = ssl.create_default_context()
+
+    result = await repo.get_aircon_stats("airco-id")
+
+    assert result == {"airconId": "airco-id"}
+    assert repo.method == new_method
+    assert session.urls == [
+        f"{old_method}://127.0.0.1:51443/beaver/command/getAirconStat",
+        f"{new_method}://127.0.0.1:51443/beaver/command/getAirconStat",
+    ]
+
+
+async def test_read_status_error_keeps_method_if_alternate_is_unreachable(repository):
+    """A real semantic error (e.g. account rejection) must survive the probe."""
+    repo, session = repository(
+        [
+            _FakeResponse(400, "account rejected"),
+            ClientConnectionError("https unavailable"),
+        ],
+        method="http",
+    )
+
+    with pytest.raises(AirconCommandError, match="account rejected"):
+        await repo.get_aircon_stats("airco-id")
+
+    assert repo.method == "http"
     assert session.urls == [
         "http://127.0.0.1:51443/beaver/command/getAirconStat",
         "https://127.0.0.1:51443/beaver/command/getAirconStat",
@@ -172,3 +258,44 @@ def test_a_poll_has_room_for_both_discovery_legs():
 def test_a_poll_cannot_outlive_its_own_interval():
     """Otherwise a slow poll is still running when the next one is due."""
     assert POLL_TIMEOUT < MIN_TIME_BETWEEN_UPDATES
+
+
+async def test_refusal_in_the_result_field_is_reported_once(repository, caplog):
+    """HTTP 200 with a non-zero result is a request the unit accepted and did
+    not carry out - invisible until now (#212). Reported, but not acted on:
+    which firmware reports what on success is not established.
+    """
+    caplog.set_level("DEBUG", logger="custom_components.mitsubishi_wf_rac.wfrac.repository")
+    refused = json.dumps({"result": 12, "contents": {"airconStat": "AAA="}})
+    repo, _ = repository(
+        [
+            _FakeResponse(200, refused),
+            _FakeResponse(200, refused),
+            _FakeResponse(200, _OK_BODY),
+            _FakeResponse(200, refused),
+        ]
+    )
+
+    # The caller still gets the response: nothing about the control flow moves.
+    assert await repo.get_aircon_stats("airco-id") == {"airconStat": "AAA="}
+    await repo.get_aircon_stats("airco-id")
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "result 12 (operation prohibited)" in warnings[0].message
+
+    # A success clears it, so a later refusal is worth saying again.
+    await repo.get_aircon_stats("airco-id")
+    await repo.get_aircon_stats("airco-id")
+
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+
+async def test_unknown_result_code_is_still_reported(repository, caplog):
+    repo, _ = repository([_FakeResponse(200, json.dumps({"result": 77, "contents": {}}))])
+
+    await repo.get_aircon_stats("airco-id")
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "result 77 (meaning unknown)" in warnings[0].message

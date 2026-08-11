@@ -1,14 +1,17 @@
 """Device module"""
+
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import Any
-import logging
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from ..const import DOMAIN, MIN_TIME_BETWEEN_UPDATES
 from .firmware_check import fetch_latest_firmware
+from .models.aircon import Aircon, AirconCommands, AirconStat, HomeLeaveModeSetting
 from .rac_parser import RacParser
 from .repository import (
     MIN_TIME_BETWEEN_REQUESTS,
@@ -18,9 +21,6 @@ from .repository import (
     AirconConnectionError,
     Repository,
 )
-from .models.aircon import Aircon, AirconCommands, AirconStat, HomeLeaveModeSetting
-
-from ..const import DOMAIN, MIN_TIME_BETWEEN_UPDATES
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,7 +84,27 @@ SERVICE_DATA_FIELDS = (
     "HotGasTemp",
     "EevPulses",
     "EevPosition",
+    "IndoorCoilTemp",
+    "IndoorCoilOutletTemp",
+    "IndoorCoilRaw",
+    "IndoorCoilOutletRaw",
+    "OutdoorCoilRaw",
+    "DischargeSuperheatRaw",
+    "ProtectionRaw",
 )
+
+# Converted fields, and the raw field each is derived from. A conversion can
+# fail while its segment arrives perfectly well - the coil temperatures are
+# only calibrated over part of the byte range (see RacParser._coil_temp) - and
+# carrying the last convertible value forward would then freeze a stale
+# temperature on screen for as long as the unit stays out of range. Which is a
+# whole heating season, and it is exactly what a frozen reading must never look
+# like. So when the raw field arrived, its temperature is not carried: no value
+# is the honest answer.
+SERVICE_DATA_DERIVED_FROM = {
+    "IndoorCoilTemp": "IndoorCoilRaw",
+    "IndoorCoilOutletTemp": "IndoorCoilOutletRaw",
+}
 
 # Room for both legs of protocol discovery plus the minimum spacing between
 # requests, so a poll that has to fall back to the other protocol is not
@@ -158,7 +178,11 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         self._firmware_update_check_enabled = firmware_update_check_enabled
         self._service_data_enabled = service_data_enabled
         self._last_service_data_request: datetime | None = None
-        self._last_service_data_response: datetime | None = None
+        # Freshness is tracked per operation-data field. One segment continuing
+        # to arrive must not keep a different, missing sensor alive forever.
+        self._last_service_data_response: dict[str, datetime] = {}
+        self._service_data_expired = False
+        self._last_foreign_update: str | None = None
         self._service_data_task: asyncio.Task | None = None
         self._consecutive_failures = 0
         # Clamped rather than validated: an entry can carry a lower value from
@@ -183,7 +207,7 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             update_interval=MIN_TIME_BETWEEN_UPDATES,
         )
 
-    async def update(self):
+    async def update(self) -> bool:
         """Update the device information from API.
 
         Called both directly (initial fetch in __init__.py before entities
@@ -206,19 +230,12 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             if response is None:
                 self._set_availability(False)
                 _LOGGER.warning("Received no data for device %s", self._airco_id)
-                return
+                return False
+        except AirconConnectionError as ex:
+            self._record_connection_failure(ex)
+            return False
         except (AirconApiError, KeyError) as ex:
             self._set_availability(False)
-            # These modules restart their WiFi on their own, so a poll landing
-            # in that window is routine rather than a fault. Report it as one
-            # line and keep the traceback for debug; a unit that answered and
-            # then failed is the interesting case and keeps the full trace.
-            if isinstance(ex, AirconConnectionError):
-                _LOGGER.warning(
-                    "Could not reach the airco [%s]: %s", self.device_name, ex
-                )
-                _LOGGER.debug("Update of [%s] failed", self.device_name, exc_info=ex)
-                return
             _LOGGER.warning(
                 "Error: something went wrong updating the airco [%s] values",
                 self.device_name,
@@ -234,7 +251,7 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             # was simply unreachable - re-registering can't succeed over a
             # connection that isn't there. add_account() swallows its own errors.
             await self.add_account()
-            return
+            return False
 
         try:
             self._connected_accounts = int(response["numOfAccount"])
@@ -249,11 +266,13 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             self._account_expires = response.get("expires")
             self._led_status = response.get("ledStat")
             self._auto_heating = response.get("autoHeating")
-            self._set_availability(True)
+            became_available = self._set_availability(True)
+            if became_available:
+                _LOGGER.info("Airco [%s] is available again", self.device_name)
         except (KeyError, TypeError, ValueError) as ex:
             _LOGGER.warning("Could not parse airco data", exc_info=ex)
             self._set_availability(False)
-            return
+            return False
 
         # Cosmetic (diagnostic sensor only). Some firmware revisions omit the
         # "mcu"/"wireless" sub-keys entirely (see #189), so their versions are
@@ -267,6 +286,7 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         self._wireless_firmware_ver = (response.get("wireless") or {}).get("firmVer")
         self._maybe_check_firmware_update()
         self._maybe_request_service_data()
+        return True
 
     def _maybe_check_firmware_update(self) -> None:
         """Kick off a background cloud firmware check if one is due (see
@@ -356,6 +376,25 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         task that deliberately swallows its errors.
         """
         await asyncio.sleep(SERVICE_DATA_REQUEST_OFFSET.total_seconds())
+        # Read first. The request rides on a setAirconStat, and that command
+        # block always carries the complete state - power, mode, fan, louvres,
+        # setpoint - because the protocol has no partial write. Whatever
+        # snapshot it is built from is therefore written back to the unit, and
+        # the snapshot from the last poll is up to a poll interval old: a
+        # change made at the unit itself in the meantime got undone about a
+        # minute later (#241). This costs one read-only request per cycle and
+        # leaves a window of about a second instead of thirty.
+        #
+        # Distance from the poll is not what keeps the module from refusing the
+        # write: the refusal rate measured the same at one second and at thirty
+        # (#230), and what recovered the lost cycles was the retry below.
+        if not await self.update():
+            # A failed refresh leaves self._airco on the previous poll. Never
+            # turn an optional diagnostics request into a full-state write of
+            # that stale snapshot; wait for a later cycle with a fresh read.
+            return
+        if self._skip_service_data_after_foreign_change():
+            return
         params = {AirconCommands.ServiceDataStatusRequest: True}
         for attempt in (1, 2):
             try:
@@ -367,8 +406,23 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
                 if attempt == 1:
                     _LOGGER.debug("Service data request refused (%s); retrying", ex)
                     await asyncio.sleep(SERVICE_DATA_RETRY_DELAY.total_seconds())
+                    # The retry is another full-state write. Five seconds is
+                    # plenty of time for a remote/app/panel change, so refresh
+                    # again instead of rebuilding from the snapshot used by the
+                    # refused first attempt. If this read fails, skip the
+                    # optional diagnostics cycle rather than writing stale
+                    # state; likewise skip once when a foreign change is seen.
+                    if not await self.update():
+                        return
+                    if self._skip_service_data_after_foreign_change():
+                        return
                     continue
-                _LOGGER.warning(
+                # Debug, not a warning: the module refuses these requests
+                # transiently and a single skipped cycle changes nothing the
+                # user can see - the values survive SERVICE_DATA_MAX_AGE. The
+                # warning belongs where they actually expire, see
+                # _note_service_data_expired().
+                _LOGGER.debug(
                     "Service data request refused twice, skipping this cycle "
                     "for [%s]: %s",
                     self.device_name,
@@ -381,29 +435,100 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         # Entities keep their previous operation-data values on a skipped cycle
         # (see _carry_forward_service_data), so there is nothing to push here.
 
-    def _carry_forward_service_data(self, new_airco: Aircon) -> None:
-        """Same rationale as _carry_forward_home_leave_mode() above: the unit
-        reports these extension segments exactly once (confirmed live
-        06.08.2026, see todo.md), so without this the sensors would flash the
-        real value for one update cycle and then revert to unknown.
+    def _skip_service_data_after_foreign_change(self) -> bool:
+        """Skip one cycle when the unit reports a change from somewhere else.
 
-        Unlike home/leave mode this expires: see SERVICE_DATA_MAX_AGE.
+        updatedBy names the source of the last change: "local" for anything
+        that arrived over the local API, including our own writes, "aircon" for
+        the unit's own controls and the IR remote, "aws" for the app by way of
+        the cloud. The read above is what actually fixes the write-back; this
+        only covers the second between that read and the write, when someone is
+        evidently still working the remote.
+
+        Only the first cycle after a change is skipped, never every cycle while
+        the field still names a foreign source: nothing but a local write
+        clears it, so skipping on the value alone would skip for ever.
+        """
+        source = self._updated_by
+        foreign = source is not None and source != "local"
+        newly_foreign = foreign and source != self._last_foreign_update
+        self._last_foreign_update = source if foreign else None
+        if newly_foreign:
+            _LOGGER.debug(
+                "Skipping the service data request for [%s]: last change came "
+                "from '%s'",
+                self.device_name,
+                source,
+            )
+        return newly_foreign
+
+    def _carry_forward_service_data(self, new_airco: Aircon) -> None:
+        """Carry one-shot operation-data values without hiding stale fields.
+
+        Each operation-data code is independent. Freshness is therefore tracked
+        per field: a compressor-frequency segment that keeps arriving must not
+        keep a missing EEV/current/temperature value alive forever.
         """
         if self._airco is None:
             return
+
         now = datetime.now()
-        if any(getattr(new_airco, name) is not None for name in SERVICE_DATA_FIELDS):
-            self._last_service_data_response = now
-        elif (
-            self._last_service_data_response is None
-            or now - self._last_service_data_response > SERVICE_DATA_MAX_AGE
-        ):
-            # Nothing fresh for too long - leave the fields unset so entities
-            # report unknown rather than a value that stopped being true.
-            return
+        fresh_fields: list[str] = []
         for name in SERVICE_DATA_FIELDS:
-            if getattr(new_airco, name) is None:
-                setattr(new_airco, name, getattr(self._airco, name))
+            if getattr(new_airco, name) is not None:
+                self._last_service_data_response[name] = now
+                fresh_fields.append(name)
+
+        if fresh_fields and self._service_data_expired:
+            self._service_data_expired = False
+            _LOGGER.info(
+                "Operation data from [%s] is being reported again",
+                self.device_name,
+            )
+
+        latest_response = max(self._last_service_data_response.values(), default=None)
+        if not fresh_fields and (
+            latest_response is None
+            or now - latest_response > SERVICE_DATA_MAX_AGE
+        ):
+            self._note_service_data_expired(now)
+
+        for name in SERVICE_DATA_FIELDS:
+            if getattr(new_airco, name) is not None:
+                continue
+            source = SERVICE_DATA_DERIVED_FROM.get(name)
+            if source is not None and getattr(new_airco, source) is not None:
+                # Segment arrived, value unusable - see SERVICE_DATA_DERIVED_FROM.
+                continue
+            last_response = self._last_service_data_response.get(name)
+            if (
+                last_response is None
+                or now - last_response > SERVICE_DATA_MAX_AGE
+            ):
+                # This field itself is stale even if some other service-data
+                # segment is still arriving. Leave it unset so the entity says
+                # unknown rather than exposing a frozen measurement as current.
+                continue
+            setattr(new_airco, name, getattr(self._airco, name))
+
+    def _note_service_data_expired(self, now: datetime) -> None:
+        """Warn once, when operation data as a whole actually goes stale."""
+        if self._service_data_expired:
+            return
+        latest_response = max(self._last_service_data_response.values(), default=None)
+        # Before the first response there is nothing to lose yet; anchor on the
+        # first request instead so a module that never answers is still
+        # reported, once, rather than silently leaving the sensors unknown.
+        anchor = latest_response or self._last_service_data_request
+        if anchor is None or now - anchor <= SERVICE_DATA_MAX_AGE:
+            return
+        self._service_data_expired = True
+        _LOGGER.warning(
+            "No operation data from [%s] for over %.0fs; its compressor, "
+            "current, temperature and EEV sensors now report unknown",
+            self.device_name,
+            SERVICE_DATA_MAX_AGE.total_seconds(),
+        )
 
     async def delete_account(self):
         """Delete account (operator id) from the airco"""
@@ -555,18 +680,53 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         # MIN_TIME_BETWEEN_UPDATES later).
         self.async_set_updated_data(self._airco)
 
-    def _set_availability(self, available: bool):
+    def _set_availability(self, available: bool) -> bool:
         """Mark the device available, or unavailable once it has missed
-        self._availability_failure_limit polls in a row."""
+        self._availability_failure_limit polls in a row.
+
+        Return True only when the failure threshold is first reached or a
+        later successful poll recovers from that threshold. Keeping the
+        counter saturated while offline prevents a long outage from looking
+        like a new transition every few polls.
+        """
         if available:
+            became_available = (
+                self._consecutive_failures >= self._availability_failure_limit
+            )
             self._consecutive_failures = 0
             self._available = True
-            return
+            return became_available
 
-        self._consecutive_failures += 1
+        previous_failures = self._consecutive_failures
+        self._consecutive_failures = min(
+            previous_failures + 1, self._availability_failure_limit
+        )
         if self._consecutive_failures >= self._availability_failure_limit:
-            self._consecutive_failures = 0
             self._available = False
+        return (
+            previous_failures < self._availability_failure_limit
+            <= self._consecutive_failures
+        )
+
+    def _record_connection_failure(self, error: BaseException) -> None:
+        """Count one failed poll, and log it at the level it deserves.
+
+        Every poll still reaches entities (_async_update_data returns the last
+        data on an expected failure), so crossing the threshold needs no
+        notification of its own - only the line that says it happened.
+        """
+        became_unavailable = self._set_availability(False)
+        if became_unavailable:
+            _LOGGER.warning(
+                "Airco [%s] is unavailable after %s failed polls",
+                self.device_name,
+                self._availability_failure_limit,
+            )
+            _LOGGER.debug("Update of [%s] failed", self.device_name, exc_info=error)
+        else:
+            _LOGGER.debug(
+                "Could not reach the airco [%s]: %s", self.device_name, error
+            )
 
     def set_available(self, available: bool):
         """Set available status"""
@@ -686,17 +846,32 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         return self._api.method
 
     async def _async_update_data(self):
-        """Update data via library."""
+        """Update data via library.
+
+        A missed poll is not an update failure. These modules restart their
+        WiFi about once an hour on their own, so single failures are routine
+        and carry no consequence: _set_availability() rides them out, and
+        entities follow Device.available rather than the coordinator's own
+        success flag. Raising UpdateFailed for one would put an error in every
+        user's log once an hour for a condition nobody can act on - and the
+        entities would flick to unavailable a poll before our own threshold
+        says they should. So an expected failure returns the last data instead,
+        and only the availability transition is worth a line.
+        """
         try:
             async with asyncio.timeout(POLL_TIMEOUT.total_seconds()):
-                await asyncio.gather(*[self.update()])
+                await self.update()
         except asyncio.TimeoutError as error:
-            # Spelled out because str(TimeoutError()) is empty: the
-            # coordinator's own message would otherwise read "Error fetching
-            # <name> data:" and stop there, which says nothing at all.
-            raise UpdateFailed(
-                f"[{self.device_name}] did not answer within "
-                f"{POLL_TIMEOUT.total_seconds():.0f}s"
-            ) from error
+            # The outer deadline can expire before the repository's individual
+            # connection attempts do. Treat that exactly like any other missed
+            # poll so transient outages stay quiet and the entity only becomes
+            # unavailable at the configured threshold.
+            self._record_connection_failure(
+                AirconConnectionError(
+                    f"did not answer within {POLL_TIMEOUT.total_seconds():.0f}s"
+                )
+            )
         except Exception as error:
             raise UpdateFailed(error) from error
+
+        return self._airco
