@@ -224,17 +224,27 @@ class Repository:
                 await asyncio.sleep(wait_for)
 
             stale_method: str | None = None
+            stored_command_error: AirconCommandError | None = None
 
             # If we already know how to communicate with the unit, proceed.
             if self._method in ("http", "https"):
                 try:
                     json_response = await _execute_request(self._method)
-                except AirconCommandError:
-                    # The unit answered, so the stored method is still the
-                    # right one - it just refused this particular command.
-                    # Discarding the method here would cost every later
-                    # request an extra discovery round trip for nothing.
-                    raise
+                except AirconCommandError as ex:
+                    # A write refusal (notably the optional Service Data 501)
+                    # does prove that the transport is alive, so keep the
+                    # current protocol for writes. Read/discovery commands are
+                    # different: some stale plaintext/HTTPS endpoints answer
+                    # the wrong scheme with an HTTP status instead of dropping
+                    # the connection. Probe the alternate transport in that
+                    # case, but keep this original command error to restore if
+                    # the alternate does not actually work.
+                    if command not in ("getDeviceInfo", "getAirconStat"):
+                        raise
+                    stale_method = self._method
+                    stored_command_error = ex
+                    self._preferred_method = stale_method
+                    self._method = None
                 except AirconConnectionError:
                     # A persisted method can be stale after a firmware/protocol
                     # change. Setup retries recreate Repository from the same
@@ -257,12 +267,29 @@ class Repository:
                     try:
                         json_response = await _execute_request(alternate_method)
                     except AirconCommandError:
-                        # The alternate transport answered, so it is valid even
-                        # if this particular command was refused.
+                        if stored_command_error is not None:
+                            # Both transports answered with a status error. We
+                            # have no evidence the persisted method changed, so
+                            # restore it and preserve the original semantic
+                            # error (e.g. an account rejection) for the caller.
+                            self._method = stale_method
+                            self._preferred_method = stale_method
+                            raise stored_command_error
+                        # The old transport was unreachable and the alternate
+                        # one answered, so the alternate transport itself is
+                        # valid even if this command was refused.
                         self._method = alternate_method
                         self._preferred_method = alternate_method
                         raise
                     except AirconConnectionError:
+                        if stored_command_error is not None:
+                            # The stored transport answered while the alternate
+                            # one did not. Restore it and surface the original
+                            # command error so account-recovery behavior remains
+                            # intact instead of misclassifying it as an outage.
+                            self._method = stale_method
+                            self._preferred_method = stale_method
+                            raise stored_command_error
                         # Neither transport answered. Leave the active method
                         # unset, but retain the last successful one as the
                         # preferred first candidate for the next discovery.
