@@ -178,7 +178,9 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         self._firmware_update_check_enabled = firmware_update_check_enabled
         self._service_data_enabled = service_data_enabled
         self._last_service_data_request: datetime | None = None
-        self._last_service_data_response: datetime | None = None
+        # Freshness is tracked per operation-data field. One segment continuing
+        # to arrive must not keep a different, missing sensor alive forever.
+        self._last_service_data_response: dict[str, datetime] = {}
         self._service_data_expired = False
         self._last_foreign_update: str | None = None
         self._service_data_task: asyncio.Task | None = None
@@ -386,7 +388,11 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         # Distance from the poll is not what keeps the module from refusing the
         # write: the refusal rate measured the same at one second and at thirty
         # (#230), and what recovered the lost cycles was the retry below.
-        await self.update()
+        if not await self.update():
+            # A failed refresh leaves self._airco on the previous poll. Never
+            # turn an optional diagnostics request into a full-state write of
+            # that stale snapshot; wait for a later cycle with a fresh read.
+            return
         if self._skip_service_data_after_foreign_change():
             return
         params = {AirconCommands.ServiceDataStatusRequest: True}
@@ -447,32 +453,36 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         return newly_foreign
 
     def _carry_forward_service_data(self, new_airco: Aircon) -> None:
-        """Same rationale as _carry_forward_home_leave_mode() above: the unit
-        reports these extension segments exactly once (confirmed live
-        06.08.2026, see todo.md), so without this the sensors would flash the
-        real value for one update cycle and then revert to unknown.
+        """Carry one-shot operation-data values without hiding stale fields.
 
-        Unlike home/leave mode this expires: see SERVICE_DATA_MAX_AGE.
+        Each operation-data code is independent. Freshness is therefore tracked
+        per field: a compressor-frequency segment that keeps arriving must not
+        keep a missing EEV/current/temperature value alive forever.
         """
         if self._airco is None:
             return
+
         now = datetime.now()
-        if any(getattr(new_airco, name) is not None for name in SERVICE_DATA_FIELDS):
-            self._last_service_data_response = now
-            if self._service_data_expired:
-                self._service_data_expired = False
-                _LOGGER.info(
-                    "Operation data from [%s] is being reported again",
-                    self.device_name,
-                )
-        elif (
-            self._last_service_data_response is None
-            or now - self._last_service_data_response > SERVICE_DATA_MAX_AGE
+        fresh_fields: list[str] = []
+        for name in SERVICE_DATA_FIELDS:
+            if getattr(new_airco, name) is not None:
+                self._last_service_data_response[name] = now
+                fresh_fields.append(name)
+
+        if fresh_fields and self._service_data_expired:
+            self._service_data_expired = False
+            _LOGGER.info(
+                "Operation data from [%s] is being reported again",
+                self.device_name,
+            )
+
+        latest_response = max(self._last_service_data_response.values(), default=None)
+        if not fresh_fields and (
+            latest_response is None
+            or now - latest_response > SERVICE_DATA_MAX_AGE
         ):
-            # Nothing fresh for too long - leave the fields unset so entities
-            # report unknown rather than a value that stopped being true.
             self._note_service_data_expired(now)
-            return
+
         for name in SERVICE_DATA_FIELDS:
             if getattr(new_airco, name) is not None:
                 continue
@@ -480,23 +490,26 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
             if source is not None and getattr(new_airco, source) is not None:
                 # Segment arrived, value unusable - see SERVICE_DATA_DERIVED_FROM.
                 continue
+            last_response = self._last_service_data_response.get(name)
+            if (
+                last_response is None
+                or now - last_response > SERVICE_DATA_MAX_AGE
+            ):
+                # This field itself is stale even if some other service-data
+                # segment is still arriving. Leave it unset so the entity says
+                # unknown rather than exposing a frozen measurement as current.
+                continue
             setattr(new_airco, name, getattr(self._airco, name))
 
     def _note_service_data_expired(self, now: datetime) -> None:
-        """Warn once, when the operation-data sensors actually go unknown.
-
-        A refused request costs a cycle and nothing else, so it stays on debug:
-        at roughly one an hour per unit it would otherwise be a permanent
-        warning about a module behaviour no one can act on. Running out of
-        values is the part a user can see, and it is worth exactly one line -
-        with a matching one when they come back.
-        """
+        """Warn once, when operation data as a whole actually goes stale."""
         if self._service_data_expired:
             return
+        latest_response = max(self._last_service_data_response.values(), default=None)
         # Before the first response there is nothing to lose yet; anchor on the
         # first request instead so a module that never answers is still
         # reported, once, rather than silently leaving the sensors unknown.
-        anchor = self._last_service_data_response or self._last_service_data_request
+        anchor = latest_response or self._last_service_data_request
         if anchor is None or now - anchor <= SERVICE_DATA_MAX_AGE:
             return
         self._service_data_expired = True
