@@ -645,7 +645,22 @@ class Device(DataUpdateCoordinator):  # pylint: disable=too-many-instance-attrib
         _carry_forward_home_leave_mode() keeps the reading available on every
         following poll instead of it reverting to unknown.
         """
-        await self.async_queue_command({AirconCommands.HomeLeaveModeStatusRequest: True})
+        # Status requests use a read-only command block. They must not enter the
+        # 500 ms write-consolidation queue: if the status flag is merged into an
+        # AirconStat that also contains an explicit climate/Home Leave write,
+        # RacParser correctly selects the read-only block and the write would be
+        # silently discarded (PR #6 P2 review).
+        #
+        # Preserve call order as well. If a write was already queued when the
+        # status request arrived, let that write finish first and only then send
+        # the read-only transaction. Shielding is intentional: cancelling the
+        # status request must not cancel a climate write that was already queued.
+        pending_write = self._consolidation_task
+        if pending_write is not None:
+            await asyncio.shield(pending_write)
+
+        await self.set_airco({AirconCommands.HomeLeaveModeStatusRequest: True})
+        self.async_set_updated_data(self._airco)
 
     async def async_set_home_leave_mode(
         self, cooling: HomeLeaveModeSetting, heating: HomeLeaveModeSetting
