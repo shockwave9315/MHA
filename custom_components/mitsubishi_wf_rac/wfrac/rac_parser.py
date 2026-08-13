@@ -1,6 +1,7 @@
 """WF-RAC parser to decode and encode wf-rac strings"""
 
 import logging
+import math
 from base64 import b64decode, b64encode
 from typing import Final
 
@@ -49,13 +50,10 @@ SERVICE_DATA_EEV_PULSES: Final = 0x13
 # indoor unit; the outdoor coil reads identically on every indoor unit sharing
 # an outdoor unit.
 #
-# Every one of them is published as a raw byte as well as any converted value,
-# because the conversion for the indoor coils only holds over part of the
-# range: it is calibrated between roughly 47 and 120 (cooling) and breaks above
-# that, where the byte climbs to 252 in heating and every candidate formula
-# puts the coil above the discharge pipe feeding it, which is impossible.
-# Converting only inside the calibrated band keeps the reading honest; the raw
-# byte is what a calibration of the rest has to be measured against.
+# Keep all five raw values available in this fork. The two indoor-coil bytes
+# now have a physical NTC conversion as well, but the raw values remain useful
+# for validating that curve and for future protocol work. The outdoor coil,
+# discharge-superheat and protection bytes still have no established unit.
 SERVICE_DATA_INDOOR_COIL_RAW: Final = 0x81
 SERVICE_DATA_OUTDOOR_COIL_RAW: Final = 0x82
 SERVICE_DATA_INDOOR_COIL_OUTLET_RAW: Final = 0x87
@@ -76,14 +74,29 @@ SERVICE_DATA_CODES: Final = (
     SERVICE_DATA_PROTECTION_RAW,
 )
 
-# The coil thermistors report the same ADC scale as the outdoor air sensor at
-# half the resolution, so outdoorTempList indexed at 2*op2 converts them.
-# Calibrated against two independent fixed points ~23 K apart, both matching
-# within ~1 K: the value right before every compressor cut-off lines up with
-# the manual's 1.0 C frost-protection threshold, and after a long standstill
-# both indoor coils settle on the measured room temperature. Only verified in
-# cooling - see todo.md.
-COIL_TEMP_INDEX_FACTOR: Final = 2
+# The coil thermistor is the same part as the two air sensors - MHI's manuals
+# print one characteristic for room air, indoor coil, outdoor coil and outdoor
+# air - sitting behind a different series resistor. That is why no indexing of
+# the app's air tables ever fit: the two are related by a fractional-linear
+# map, not an offset. Converting from the part instead of from a table also
+# removes the ceiling those tables had (43 C), which an indoor coil in heating
+# leaves within seconds.
+#
+# byte = GAIN * Rs / (Rs + R(T)),  R(T) = R25 * exp(B * (1/T - 1/298.15))
+#
+# R25/B are the thermistor's own values (~5 kOhm, B~3950); with GAIN and the
+# two air channels' own series resistors this reproduces both app tables to
+# ~0.3 K, so only Rs is specific to the coil channel.
+COIL_THERMISTOR_R25: Final = 5200.0
+COIL_THERMISTOR_B: Final = 3900.0
+COIL_ADC_GAIN: Final = 367.0
+# Fitted upstream to four infrared readings taken on the coil during one
+# heating run plus a standstill reading against a room thermometer, RMS
+# roughly 0.25 K over 23-46 C.
+COIL_SERIES_RESISTOR: Final = 1912.0
+# Highest byte directly checked against a thermometer upstream. Values above
+# it still use the physically-motivated curve, but remain extrapolation.
+COIL_TEMP_VERIFIED_MAX: Final = 170
 
 # Bit masks
 OPERATION_MASK: Final = 3
@@ -130,8 +143,13 @@ class RacParser:
     def to_base64(self, aircon_stat: AirconStat) -> str:
         """Convert AirconStat to Base64 string."""
         try:
+            build_command = (
+                self.status_request_to_byte
+                if self._is_status_request(aircon_stat)
+                else self.command_to_byte
+            )
             command = self.add_crc16(
-                self.command_to_byte(aircon_stat) + self._variable_trailer(aircon_stat)
+                build_command(aircon_stat) + self._variable_trailer(aircon_stat)
             )
             receive = self.add_crc16(self.add_variable(self.receive_to_bytes(aircon_stat)))
             return b64encode(bytes(command + receive)).decode("ascii")
@@ -141,6 +159,19 @@ class RacParser:
     def add_variable(self, byte_buffer: bytearray) -> bytearray:
         """Concat byte_buffer with variable suffix."""
         return byte_buffer + VARIABLE_SUFFIX
+
+    @staticmethod
+    def _is_status_request(aircon_stat: AirconStat) -> bool:
+        """Return whether the frame exists only to ask the unit something.
+
+        Service Data and Home Leave status are read requests carried by a
+        setAirconStat transaction. They must not carry the set-bits that would
+        apply the current HA snapshot back onto the physical unit.
+        """
+        return bool(
+            aircon_stat.ServiceDataStatusRequest
+            or aircon_stat.HomeLeaveModeStatusRequest
+        )
 
     @staticmethod
     def _build_trailer(segments: list[tuple[int, int, int, int]]) -> bytearray:
@@ -192,14 +223,31 @@ class RacParser:
             return cls._build_trailer(segments)
 
         if aircon_stat.ServiceDataStatusRequest:
-            # OP1=255 -> "report current value" (see rac_parser docstring/
-            # CLAUDE.md guardrail: never 0, that would be a write to the
-            # climate MCU). Confirmed live (06.08.2026) to answer all four in
-            # the direct setAirconStat response - see todo.md.
+            # OP1=255 -> "report current value"; never 0, which would be a
+            # write to the climate MCU. All requested segments answer in the
+            # same setAirconStat response when supported by the module.
             segments = [(code, 255, 255, 255) for code in SERVICE_DATA_CODES]
             return cls._build_trailer(segments)
 
         return VARIABLE_SUFFIX
+
+    def status_request_to_byte(self, aircon_stat: AirconStat) -> bytearray:
+        """Build a command block for a request that only reads.
+
+        On the MHI bus a value takes effect only when its accompanying set-bit
+        travels with it: power DB0[1], mode DB0[5], vane DB0[7]/DB1[7], fan
+        DB1[3], setpoint DB2[7]. A status request only needs a frame to carry
+        its trailer, so every one of those set-bits stays clear.
+
+        Byte 8 is the exception and is carried as usual: it has no set-bit of
+        its own, and dropping it clears the unit's echo of it in DB5 bit 4.
+        Upstream verified this behavior on physical hardware with both running
+        and stopped indoor units.
+        """
+        stat_byte = _empty_stat_bytes()
+        if not aircon_stat.CoolHotJudge:
+            stat_byte[8] |= 8
+        return stat_byte
 
     def command_to_byte(self, aircon_stat: AirconStat) -> bytearray:
         """Command to bytes"""
@@ -393,6 +441,9 @@ class RacParser:
                 vals[i] == HOME_LEAVE_MODE_TAG_SIGNED
                 and vals[i + 1] == HOME_LEAVE_MODE_READ_MARKER
             ):
+                # Keep the fork's signed Home Leave temperature handling.
+                # Temperature subcodes may legitimately be negative; only the
+                # airflow subcodes are unsigned protocol bytes.
                 subcode = vals[i + 2] & 0xFF
                 value = vals[i + 3]
                 if subcode in (31, 32):
@@ -456,27 +507,25 @@ class RacParser:
 
     @staticmethod
     def _coil_temp(op2: int, code: int) -> float | None:
-        """Convert a heat-exchanger thermistor byte to deg C, or None above the
-        calibrated band - see COIL_TEMP_INDEX_FACTOR.
+        """Convert a heat-exchanger thermistor byte to degrees C.
 
-        None rather than a clamp or an extrapolation: the table ends at 42 C
-        and an indoor coil in heating goes well past that, so either would
-        report a plausible-looking wrong temperature instead of an honest gap.
-        The raw byte remains available on its own sensor throughout, which is
-        what the missing part of the curve has to be measured against.
+        Invert the divider around the NTC so the heating range no longer falls
+        off the end of the outdoor-air lookup table. Byte 0 is the divider's
+        endpoint rather than a meaningful temperature and therefore stays
+        unknown. The raw byte is preserved separately in this fork.
         """
-        index = op2 * COIL_TEMP_INDEX_FACTOR
-        if index >= len(outdoorTempList):
-            # Debug, not a warning: this is the known edge of the calibration,
-            # not a fault, and it holds for a whole heating season at a time.
-            # The gap is visible on the entity itself.
+        if not 0 < op2 < COIL_ADC_GAIN:
             _LOGGER.debug(
-                "Heat-exchanger byte %d (code 0x%02x) is above the calibrated range",
+                "Heat-exchanger byte %d (code 0x%02x) is outside the sensor's range",
                 op2,
                 code,
             )
             return None
-        return outdoorTempList[index]
+        resistance = COIL_SERIES_RESISTOR * (COIL_ADC_GAIN / op2 - 1.0)
+        inverse_kelvin = (
+            math.log(resistance / COIL_THERMISTOR_R25) / COIL_THERMISTOR_B + 1 / 298.15
+        )
+        return round(1 / inverse_kelvin - 273.15, 1)
 
     @staticmethod
     def _log_unknown_segment(vals: list[int], i: int) -> None:

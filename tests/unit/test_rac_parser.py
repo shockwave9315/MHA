@@ -319,12 +319,11 @@ def test_parse_temperatures_service_data_segments(parser):
     assert ac.HotGasTemp == pytest.approx(42.5)
     assert ac.EevPulses == 106
     assert ac.EevPosition == 42
-    # 0x2F = 47 -> outdoorTempList[94], the frost-protection cut-off the
-    # calibration is anchored on; 0x5D = 93 -> outdoorTempList[186].
-    assert ac.IndoorCoilTemp == pytest.approx(1.0)
-    assert ac.IndoorCoilOutletTemp == pytest.approx(23.7)
-    # Both coils also publish the byte they were converted from: that is what
-    # the missing part of the curve has to be measured against.
+    # 0x2F = 47 and 0x5D = 93 through the NTC divider curve. Raw 93 lands
+    # close to room temperature, where the coil settles after a long stop.
+    assert ac.IndoorCoilTemp == pytest.approx(5.5)
+    assert ac.IndoorCoilOutletTemp == pytest.approx(23.2)
+    # Keep the bytes exposed in this fork for validation/reverse engineering.
     assert ac.IndoorCoilRaw == 0x2F
     assert ac.IndoorCoilOutletRaw == 0x5D
     # No conversion is known for these three, so they stay raw bytes.
@@ -352,15 +351,31 @@ def test_parse_temperatures_service_data_absent_by_default(parser):
     assert ac.ProtectionRaw is None
 
 
-def test_coil_temp_outside_calibrated_range_keeps_only_the_raw_byte(parser):
-    # The table ends at 42 C (index 255), so any byte above 127 has no
-    # conversion - which is where a heating coil spends its whole season.
-    # Reporting None beats clamping to a wrong-looking 42, and the raw byte
-    # still gets through, see todo.md.
+def test_coil_temp_converts_the_heating_range(parser):
+    # The old air-table mapping ended here; a heating coil spends much of its
+    # life above raw 127. The NTC conversion must keep reporting temperature.
     ac = Aircon()
     parser._parse_temperatures(ac, [0x81 - 256, 0x20, 0x80, 0])
-    assert ac.IndoorCoilTemp is None
+    assert ac.IndoorCoilTemp == pytest.approx(33.8)
     assert ac.IndoorCoilRaw == 0x80
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(129, 34.1), (152, 40.7), (170, 45.8)],
+)
+def test_coil_temp_matches_measured_heating_points(parser, raw, expected):
+    ac = Aircon()
+    parser._parse_temperatures(ac, [0x81 - 256, 0x20, raw, 0])
+    assert ac.IndoorCoilTemp == pytest.approx(expected)
+    assert ac.IndoorCoilRaw == raw
+
+
+def test_coil_temp_zero_byte_keeps_only_raw_value(parser):
+    ac = Aircon()
+    parser._parse_temperatures(ac, [0x81 - 256, 0x20, 0, 0])
+    assert ac.IndoorCoilTemp is None
+    assert ac.IndoorCoilRaw == 0
 
 
 def test_to_base64_default_length_unchanged_by_home_leave_mode(parser):
