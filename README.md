@@ -55,7 +55,7 @@ Jeśli Home Assistant działa po polsku, konfiguracja, opcje i nazwy encji będ�
 | Availability retry limit | liczba kolejnych nieudanych odpytań przed oznaczeniem urządzenia jako niedostępne; minimum 3 |
 | Firmware Update Check (Online) | opcjonalne sprawdzanie dostępności nowszego firmware |
 | Service Data | dodatkowe lokalne dane diagnostyczne |
-| Create swing mode selectors | tworzy osobne selektory poziomego i pionowego kierunku nawiewu |
+| Create swing mode selectors | ustawienie dostępne tylko podczas pierwszego dodawania urządzenia; tworzy osobne selektory poziomego i pionowego kierunku nawiewu. Późniejsza zmiana wymaga usunięcia i ponownego dodania urządzenia |
 | Indoor Temp. Sensor Offset | korekta temperatury wewnętrznej |
 | Outdoor Temp. Sensor Offset | korekta temperatury zewnętrznej |
 | Target Temp. Offset | ogólna korekta temperatury zadanej |
