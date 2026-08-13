@@ -1,0 +1,285 @@
+{
+  "config": {
+    "error": {
+      "unexpected_error": "Wystąpił nieoczekiwany błąd. Szczegóły znajdziesz w logu.",
+      "cannot_connect": "Nie udało się połączyć z klimatyzatorem: {reason}",
+      "name_invalid": "Nazwa jest już używana lub ma mniej niż 3 znaki",
+      "host_already_configured": "Adres IP klimatyzatora jest już skonfigurowany jako [{error_name}]",
+      "too_many_devices_registered": "Dla tego klimatyzatora zarejestrowano zbyt wiele urządzeń. Usuń jedno urządzenie w aplikacji lub przywróć moduł do ustawień fabrycznych."
+    },
+    "abort": {
+      "existing_instance_updated": "Zaktualizowano istniejącą konfigurację.",
+      "already_configured": "Klimatyzator jest już skonfigurowany"
+    },
+    "step": {
+      "user": {
+        "data": {
+          "name": "Nazwa klimatyzatora",
+          "host": "Adres hosta (IP)",
+          "port": "Port",
+          "force_update": "Ignoruj zduplikowany adres IP (może powodować błędy — sprawdź log)",
+          "create_swing_mode_select": "Utwórz dodatkowe selektory kierunku żaluzji"
+        },
+        "description": "Wprowadź poprawne dane lokalnego połączenia z modułem WF-RAC, aby dodać klimatyzator ręcznie.",
+        "title": "Dane połączenia WF-RAC"
+      },
+      "discovery_confirm": {
+        "description": "Wykryto klimatyzator o ID: {id}, adresie IP: {host} i porcie: {port}. Nadaj mu nazwę.",
+        "title": "Wykryto klimatyzator WF-RAC",
+        "data": {
+          "name": "Nazwa klimatyzatora"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "description": "Poniżej możesz zmienić ustawienia tego klimatyzatora.",
+        "data": {
+          "host": "Adres hosta (IP)",
+          "availability_retry_limit": "Limit nieudanych odpytań przed oznaczeniem jako niedostępny (minimum 3)",
+          "firmware_update_check": "Sprawdzanie aktualizacji firmware (online)",
+          "service_data": "Dane serwisowe",
+          "create_swing_mode_select": "Utwórz dodatkowe selektory kierunku żaluzji",
+          "indoor_offset": "Korekta czujnika temperatury wewnętrznej",
+          "outdoor_offset": "Korekta czujnika temperatury zewnętrznej",
+          "target_offset": "Korekta temperatury zadanej",
+          "target_offset_cool": "Korekta temperatury zadanej (chłodzenie)",
+          "target_offset_heat": "Korekta temperatury zadanej (grzanie)"
+        },
+        "title": "Ustawienia WF-RAC"
+      }
+    }
+  },
+  "entity": {
+    "climate": {
+      "mitsubishi_wf_rac": {
+        "state_attributes": {
+          "fan_mode": {
+            "state": {
+              "auto": "Auto",
+              "quiet": "Cichy",
+              "low": "Niski",
+              "medium": "Średni",
+              "high": "Wysoki"
+            }
+          },
+          "swing_mode": {
+            "state": {
+              "up_down_auto": "Auto góra/dół",
+              "highest": "Najwyżej",
+              "middle": "Środek",
+              "normal": "Normalnie",
+              "lowest": "Najniżej",
+              "3d_auto": "3D Auto"
+            }
+          },
+          "swing_horizontal_mode": {
+            "state": {
+              "left_right_auto": "Auto lewo/prawo",
+              "left_left": "Lewo–lewo",
+              "left_center": "Lewo–środek",
+              "center_center": "Środek–środek",
+              "center_right": "Środek–prawo",
+              "right_right": "Prawo–prawo",
+              "left_right": "Lewo–prawo",
+              "right_left": "Prawo–lewo",
+              "3d_auto": "3D Auto"
+            }
+          }
+        }
+      }
+    },
+    "select": {
+      "horizontal_swing": {
+        "name": "Poziomy kierunek nawiewu",
+        "state": {
+          "left_right_auto": "Auto lewo/prawo",
+          "left_left": "Lewo–lewo",
+          "left_center": "Lewo–środek",
+          "center_center": "Środek–środek",
+          "center_right": "Środek–prawo",
+          "right_right": "Prawo–prawo",
+          "left_right": "Lewo–prawo",
+          "right_left": "Prawo–lewo",
+          "3d_auto": "3D Auto"
+        }
+      },
+      "vertical_swing": {
+        "name": "Pionowy kierunek nawiewu",
+        "state": {
+          "up_down_auto": "Auto góra/dół",
+          "highest": "Najwyżej",
+          "middle": "Środek",
+          "normal": "Normalnie",
+          "lowest": "Najniżej",
+          "3d_auto": "3D Auto"
+        }
+      },
+      "fan_speed": {
+        "name": "Prędkość wentylatora",
+        "state": {
+          "auto": "Auto",
+          "quiet": "Cichy",
+          "low": "Niski",
+          "medium": "Średni",
+          "high": "Wysoki"
+        }
+      },
+      "home_leave_mode": {
+        "name": "Tryb nieobecności",
+        "state": {
+          "off": "Wyłączony",
+          "away_cool": "Nieobecność – chłodzenie",
+          "away_heat": "Nieobecność – grzanie"
+        }
+      },
+      "home_leave_cooling_air_flow": {
+        "name": "Nawiew trybu nieobecności – chłodzenie",
+        "state": {
+          "auto": "Auto",
+          "1": "1",
+          "2": "2",
+          "3": "3",
+          "4": "4"
+        }
+      },
+      "home_leave_heating_air_flow": {
+        "name": "Nawiew trybu nieobecności – grzanie",
+        "state": {
+          "auto": "Auto",
+          "1": "1",
+          "2": "2",
+          "3": "3",
+          "4": "4"
+        }
+      }
+    },
+    "number": {
+      "home_leave_cooling_temp_rule": {
+        "name": "Próg temperatury zewnętrznej trybu nieobecności – chłodzenie"
+      },
+      "home_leave_cooling_temp_setting": {
+        "name": "Docelowa temperatura pomieszczenia trybu nieobecności – chłodzenie"
+      },
+      "home_leave_heating_temp_rule": {
+        "name": "Próg temperatury zewnętrznej trybu nieobecności – grzanie"
+      },
+      "home_leave_heating_temp_setting": {
+        "name": "Docelowa temperatura pomieszczenia trybu nieobecności – grzanie"
+      }
+    },
+    "sensor": {
+      "indoor": {
+        "name": "Temperatura wewnętrzna"
+      },
+      "outdoor": {
+        "name": "Temperatura zewnętrzna"
+      },
+      "target": {
+        "name": "Temperatura zadana"
+      },
+      "airco_id": {
+        "name": "ID klimatyzatora"
+      },
+      "operator_id": {
+        "name": "ID operatora"
+      },
+      "device_id": {
+        "name": "ID urządzenia"
+      },
+      "host": {
+        "name": "IP"
+      },
+      "connected_accounts": {
+        "name": "Połączone konta"
+      },
+      "error": {
+        "name": "Błąd"
+      },
+      "updated_by": {
+        "name": "Ostatnia zmiana przez"
+      },
+      "account_expires": {
+        "name": "Wygaśnięcie konta"
+      },
+      "led_status": {
+        "name": "Stan LED"
+      },
+      "auto_heating": {
+        "name": "Automatyczne grzanie"
+      },
+      "model_nr": {
+        "name": "Numer modelu"
+      },
+      "cool_hot_judge": {
+        "name": "Ocena chłodzenie/grzanie"
+      },
+      "energy_usage": {
+        "name": "Zużycie energii (bieżący cykl)"
+      },
+      "energy_usage_total": {
+        "name": "Łączne zużycie energii"
+      },
+      "compressor_frequency": {
+        "name": "Częstotliwość sprężarki"
+      },
+      "operating_current": {
+        "name": "Prąd pracy"
+      },
+      "hot_gas_temp": {
+        "name": "Temperatura gazu tłocznego"
+      },
+      "eev_pulses": {
+        "name": "Impulsy EEV"
+      },
+      "eev_position": {
+        "name": "Pozycja EEV"
+      },
+      "indoor_coil_temp": {
+        "name": "Temperatura wymiennika wewnętrznego"
+      },
+      "indoor_coil_outlet_temp": {
+        "name": "Temperatura wylotu wymiennika wewnętrznego"
+      },
+      "indoor_coil_raw": {
+        "name": "Czujnik wymiennika wewnętrznego (wartość surowa)"
+      },
+      "indoor_coil_outlet_raw": {
+        "name": "Czujnik wylotu wymiennika wewnętrznego (wartość surowa)"
+      },
+      "outdoor_coil_raw": {
+        "name": "Czujnik wymiennika zewnętrznego (wartość surowa)"
+      },
+      "discharge_superheat_raw": {
+        "name": "Przegrzanie tłoczenia (wartość surowa)"
+      },
+      "protection_raw": {
+        "name": "Numer zabezpieczenia (wartość surowa)"
+      }
+    },
+    "binary_sensor": {
+      "problem": {
+        "name": "Problem"
+      },
+      "occupancy": {
+        "name": "Obecność"
+      },
+      "compressor": {
+        "name": "Żądanie pracy sprężarki"
+      }
+    },
+    "switch": {},
+    "update": {
+      "firmware_update": {
+        "name": "Aktualizacja firmware"
+      }
+    },
+    "button": {
+      "reset_energy_total": {
+        "name": "Resetuj łączne zużycie energii"
+      }
+    }
+  }
+}
