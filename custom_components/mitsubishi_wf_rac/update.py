@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.update import UpdateDeviceClass, UpdateEntity
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import MitsubishiWfRacConfigEntry
 from .entity import WfRacEntity
@@ -12,9 +14,14 @@ from .wfrac.device import Device
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+PARALLEL_UPDATES = 1
 
 
-async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: MitsubishiWfRacConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Setup update entries"""
 
     device: Device = entry.runtime_data.device
@@ -32,8 +39,7 @@ class FirmwareUpdateEntity(WfRacEntity, UpdateEntity):
     Compares the version reported locally (device.py, from getAirconStat)
     against the manufacturer's unauthenticated getFirmware endpoint - see
     wfrac/firmware_check.py. Read-only: the module only downloads and flashes
-    itself while switched off (see FUNDE.md's OTA section), so triggering an
-    install isn't offered here.
+    itself while switched off, so triggering an install isn't offered here.
     """
 
     _attr_has_entity_name = True

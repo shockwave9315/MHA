@@ -9,7 +9,8 @@
     },
     "abort": {
       "existing_instance_updated": "已更新现有配置。",
-      "already_configured": "空调已配置"
+      "already_configured": "空调已配置",
+      "reconfigure_successful": "重新配置成功"
     },
     "step": {
       "user": {
@@ -17,8 +18,7 @@
           "name": "空调名称",
           "host": "主机（IP）地址",
           "port": "端口",
-          "force_update": "忽略重复 IP（可能/将会引发错误，请检查错误日志）",
-          "create_swing_mode_select": "是否创建额外的摆风模式选择器。"
+          "force_update": "忽略重复 IP（可能/将会引发错误，请检查错误日志）"
         },
         "description": "请填写正确的信息以手动添加空调",
         "title": "WF-RAC 空调连接信息"
@@ -29,7 +29,45 @@
         "data": {
           "name": "空调名称"
         }
+      },
+      "reconfigure": {
+        "data": {
+          "name": "空调名称",
+          "host": "主机（IP）地址",
+          "port": "端口"
+        },
+        "description": "更新此空调的连接信息。",
+        "title": "重新配置 WF-RAC 空调连接"
       }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "无法连接到位于 {device} 的空调。"
+    },
+    "temperature_required": {
+      "message": "需要指定目标温度。"
+    },
+    "temperature_below_minimum": {
+      "message": "{temperature}°C 低于此模式下的最低温度 {min_temp}°C。"
+    },
+    "temperature_above_maximum": {
+      "message": "{temperature}°C 高于此模式下的最高温度 {max_temp}°C。"
+    },
+    "home_leave_mode_not_supported": {
+      "message": "此型号未报告支持离家模式（Home Leave Mode）功能。"
+    },
+    "home_leave_mode_status_unknown": {
+      "message": "离家模式的数值尚未知晓。请先调用一次空调实体的“请求离家模式状态”操作 —— 常规轮询不包含这些数值。"
+    },
+    "entity_not_energy_total_sensor": {
+      "message": "{entity_id} 不是累计用电量传感器。"
+    }
+  },
+  "issues": {
+    "too_many_devices": {
+      "title": "{device_name} 上注册的设备过多",
+      "description": "由于模块的账户表已满，Home Assistant 无法在此空调上注册。请在 Smart M-Air 应用中删除另一个已注册的设备，或对模块进行出厂重置，然后重新加载此集成。"
     }
   },
   "options": {
@@ -37,18 +75,19 @@
       "init": {
         "description": "以下是你可以为此空调更改的选项。",
         "data": {
-          "host": "主机（IP）地址",
           "availability_retry_limit": "重试次数上限（最少 3）",
           "firmware_update_check": "固件更新检查（在线）",
-          "service_data": "服务数据",
-          "create_swing_mode_select": "是否创建额外的摆风模式选择器。",
           "indoor_offset": "室内偏移",
           "outdoor_offset": "室外偏移",
           "target_offset": "目标偏移",
           "target_offset_cool": "目标偏移（制冷）",
           "target_offset_heat": "目标偏移（制热）"
         },
-        "title": "WF-RAC 空调连接信息"
+        "title": "WF-RAC 选项",
+        "data_description": {
+          "target_offset_cool": "留空以使用通用的目标温度偏移。",
+          "target_offset_heat": "留空以使用通用的目标温度偏移。"
+        }
       }
     }
   },
@@ -225,11 +264,20 @@
       "compressor_frequency": {
         "name": "压缩机频率"
       },
+      "compressor_frequency_raw": {
+        "name": "压缩机频率（原始）"
+      },
       "operating_current": {
         "name": "运行电流"
       },
+      "operating_current_raw": {
+        "name": "运行电流（原始）"
+      },
       "hot_gas_temp": {
         "name": "排气温度"
+      },
+      "hot_gas_temp_raw": {
+        "name": "排气温度（原始）"
       },
       "eev_pulses": {
         "name": "电子膨胀阀脉冲"
@@ -244,19 +292,19 @@
         "name": "室内换热器出口温度"
       },
       "indoor_coil_raw": {
-        "name": "室内换热器传感器（原始值）"
+        "name": "室内换热器温度（原始）"
       },
       "indoor_coil_outlet_raw": {
-        "name": "室内换热器出口传感器（原始值）"
+        "name": "室内换热器出口温度（原始）"
       },
       "outdoor_coil_raw": {
-        "name": "室外换热器传感器（原始值）"
+        "name": "室外换热器温度（原始）"
       },
       "discharge_superheat_raw": {
-        "name": "排气过热度（原始值）"
+        "name": "排气过热度（原始）"
       },
       "protection_raw": {
-        "name": "保护代码（原始值）"
+        "name": "保护编号（原始）"
       }
     },
     "binary_sensor": {

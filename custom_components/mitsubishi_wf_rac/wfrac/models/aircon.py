@@ -27,9 +27,8 @@ class AirconCommands(StrEnum):
     # fixed-byte field like the ones above, encoded/decoded as a variable
     # trailer in rac_parser.py. HomeLeaveModeStatusRequest asks the unit to
     # report its current values (it omits this segment from a plain
-    # getAirconStat otherwise - confirmed empirically, see #187 notes in
-    # FUNDE.md); the ForCooling/ForHeating pair writes new ones. Both
-    # directions verified live (05.08.2026), see todo.md.
+    # getAirconStat otherwise, confirmed empirically); the ForCooling/
+    # ForHeating pair writes new ones. Both directions verified live.
     HomeLeaveModeStatusRequest = "HomeLeaveModeStatusRequest"
     HomeLeaveModeForCooling = "HomeLeaveModeForCooling"
     HomeLeaveModeForHeating = "HomeLeaveModeForHeating"
@@ -84,11 +83,11 @@ class Aircon(AirconBase):
     CompressorRunning: bool = False
     # Raw ModelNr byte (content[0] & 127) before mapping to the known 0/1/2
     # values - kept around so an unrecognized value (ModelNr == -1) is still
-    # visible as a diagnostic, e.g. for reports like #189.
+    # visible as a diagnostic, e.g. for unrecognized-model bug reports.
     ModelNrRaw: int = 0
-    # Feature availability per the app's own model_no_type table (#187),
-    # looked up from ModelNrRaw - independent of the ModelNr 0/1/2 grouping
-    # above, which instead reflects the wire-protocol byte layout.
+    # Feature availability per the app's own model_no_type table, looked up
+    # from ModelNrRaw - independent of the ModelNr 0/1/2 grouping above,
+    # which instead reflects the wire-protocol byte layout.
     Capabilities: ModelCapabilities = field(default_factory=lambda: get_capabilities(0))
     # Populated only after a HomeLeaveModeStatusRequest round-trip (see
     # AirconCommands) - stays None otherwise, including on units that
@@ -100,8 +99,11 @@ class Aircon(AirconBase):
     # Device._carry_forward_service_data(), same rationale as HomeLeaveMode
     # above: the unit reports these extension segments exactly once.
     CompressorFrequency: float | None = None  # Hz
+    CompressorFrequencyRaw: int | None = None
     OperatingCurrent: float | None = None  # A
+    OperatingCurrentRaw: int | None = None
     HotGasTemp: float | None = None  # deg C
+    HotGasTempRaw: int | None = None
     EevPulses: int | None = None
     EevPosition: int | None = None  # % of raw pulse range 0-255, full-open pulse count unknown
     # deg C, THI-R1/THI-R3, per indoor unit. None outside the calibrated band,
@@ -132,7 +134,7 @@ class AirconStat(AirconBase):
     HomeLeaveModeForCooling: HomeLeaveModeSetting | None = None
     HomeLeaveModeForHeating: HomeLeaveModeSetting | None = None
     # See AirconCommands - only ever set via Device._maybe_request_service_data().
-    ServiceDataStatusRequest: bool = False
+    ServiceDataStatusRequest: tuple[int, ...] = ()
 
     @classmethod
     def from_aircon(cls, aircon: Aircon) -> "AirconStat":

@@ -9,7 +9,8 @@
     },
     "abort": {
       "existing_instance_updated": "既存の設定が更新されました。",
-      "already_configured": "エアコンは既に設定されています。"
+      "already_configured": "エアコンは既に設定されています。",
+      "reconfigure_successful": "再設定が完了しました"
     },
     "step": {
       "user": {
@@ -17,8 +18,7 @@
           "name": "エアコン名",
           "host": "ホスト（IP）アドレス",
           "port": "ポート",
-          "force_update": "重複IPを無視（エラーが発生する可能性があるため、エラーログを確認してください）",
-          "create_swing_mode_select": "追加のスイングモードセレクターを作成するかどうか。"
+          "force_update": "重複IPを無視（エラーが発生する可能性があるため、エラーログを確認してください）"
         },
         "description": "エアコンを手動で追加するために正しい情報を入力してください。",
         "title": "WF-RACエアコン接続情報"
@@ -29,7 +29,45 @@
         "data": {
           "name": "エアコン名"
         }
+      },
+      "reconfigure": {
+        "data": {
+          "name": "エアコン名",
+          "host": "ホスト（IP）アドレス",
+          "port": "ポート"
+        },
+        "description": "このエアコンの接続情報を更新してください。",
+        "title": "WF-RACエアコン接続の再設定"
       }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "{device} のエアコンに到達できませんでした。"
+    },
+    "temperature_required": {
+      "message": "目標温度を指定してください。"
+    },
+    "temperature_below_minimum": {
+      "message": "{temperature}°Cはこのモードの最低温度{min_temp}°Cを下回っています。"
+    },
+    "temperature_above_maximum": {
+      "message": "{temperature}°Cはこのモードの最高温度{max_temp}°Cを超えています。"
+    },
+    "home_leave_mode_not_supported": {
+      "message": "この機種はHome Leave Mode機能を報告していません。"
+    },
+    "home_leave_mode_status_unknown": {
+      "message": "Home Leave Modeの値はまだ不明です。エアコンエンティティの「Home Leave Modeステータスを要求」アクションを一度実行してください。通常のポーリングにはこの値は含まれません。"
+    },
+    "entity_not_energy_total_sensor": {
+      "message": "{entity_id} は積算電力量センサーではありません。"
+    }
+  },
+  "issues": {
+    "too_many_devices": {
+      "title": "{device_name} に登録されているデバイスが多すぎます",
+      "description": "モジュールのアカウントテーブルが一杯のため、Home Assistantはこのエアコンに登録できませんでした。Smart M-Airアプリで登録済みの別のデバイスを削除するか、モジュールを工場出荷時設定にリセットしてから、このインテグレーションを再読み込みしてください。"
     }
   },
   "options": {
@@ -37,18 +75,19 @@
       "init": {
         "description": "以下は、このエアコンの変更可能なオプションです。",
         "data": {
-          "host": "ホスト（IP）アドレス",
           "availability_retry_limit": "リトライ回数の上限（最小 3）",
           "firmware_update_check": "ファームウェア更新の確認 (オンライン)",
-          "service_data": "サービスデータ",
-          "create_swing_mode_select": "追加のスイングモードセレクターを作成するかどうか。",
           "indoor_offset": "室内オフセット",
           "outdoor_offset": "室外オフセット",
           "target_offset": "設定オフセット",
           "target_offset_cool": "設定オフセット（冷房時）",
           "target_offset_heat": "設定オフセット（暖房時）"
         },
-        "title": "WF-RACエアコン接続情報"
+        "title": "WF-RAC の設定",
+        "data_description": {
+          "target_offset_cool": "空欄の場合は、共通の設定オフセットが使用されます。",
+          "target_offset_heat": "空欄の場合は、共通の設定オフセットが使用されます。"
+        }
       }
     }
   },
@@ -225,11 +264,20 @@
       "compressor_frequency": {
         "name": "圧縮機周波数"
       },
+      "compressor_frequency_raw": {
+        "name": "圧縮機周波数 (生値)"
+      },
       "operating_current": {
         "name": "運転電流"
       },
+      "operating_current_raw": {
+        "name": "運転電流 (生値)"
+      },
       "hot_gas_temp": {
         "name": "吐出ガス温度"
+      },
+      "hot_gas_temp_raw": {
+        "name": "吐出ガス温度 (生値)"
       },
       "eev_pulses": {
         "name": "電子膨張弁パルス"
@@ -244,13 +292,13 @@
         "name": "室内熱交換器出口温度"
       },
       "indoor_coil_raw": {
-        "name": "室内熱交換器センサー (生値)"
+        "name": "室内熱交換器温度 (生値)"
       },
       "indoor_coil_outlet_raw": {
-        "name": "室内熱交換器出口センサー (生値)"
+        "name": "室内熱交換器出口温度 (生値)"
       },
       "outdoor_coil_raw": {
-        "name": "室外熱交換器センサー (生値)"
+        "name": "室外熱交換器温度 (生値)"
       },
       "discharge_superheat_raw": {
         "name": "吐出過熱度 (生値)"

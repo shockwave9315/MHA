@@ -9,7 +9,8 @@
     },
     "abort": {
       "existing_instance_updated": "Huidige configuratie is geüpdatet.",
-      "already_configured": "Airco is al geconfigureerd"
+      "already_configured": "Airco is al geconfigureerd",
+      "reconfigure_successful": "Herconfiguratie geslaagd"
     },
     "step": {
       "user": {
@@ -17,8 +18,7 @@
           "name": "Airco Naam",
           "host": "Host (IP) adres",
           "port": "Poort",
-          "force_update": "Negeer dubbel IP (kan en zal fouten veroorzaken, dus controleer het foutlog)",
-          "create_swing_mode_select": "Of er extra zwaaimodus-selectors moeten worden aangemaakt."
+          "force_update": "Negeer dubbel IP (kan en zal fouten veroorzaken, dus controleer het foutlog)"
         },
         "description": "Voer de juiste informatie toe om de airco handmatig toe te voegen ",
         "title": "WF-RAC AC verbinding info"
@@ -29,7 +29,45 @@
         "data": {
           "name": "Airco naam"
         }
+      },
+      "reconfigure": {
+        "data": {
+          "name": "Airco Naam",
+          "host": "Host (IP) adres",
+          "port": "Poort"
+        },
+        "description": "Werk de verbindingsgegevens voor deze airco bij.",
+        "title": "WF-RAC AC verbinding herconfigureren"
       }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "Kon de airco op {device} niet bereiken."
+    },
+    "temperature_required": {
+      "message": "Een doeltemperatuur is verplicht."
+    },
+    "temperature_below_minimum": {
+      "message": "{temperature} °C is lager dan het minimum van {min_temp} °C voor deze modus."
+    },
+    "temperature_above_maximum": {
+      "message": "{temperature} °C is hoger dan het maximum van {max_temp} °C voor deze modus."
+    },
+    "home_leave_mode_not_supported": {
+      "message": "Dit model rapporteert de Home Leave Mode functie niet."
+    },
+    "home_leave_mode_status_unknown": {
+      "message": "De Home Leave Mode waarden zijn nog niet bekend. Roep eerst één keer de actie \"Home Leave Mode status opvragen\" van de climate-entiteit aan - het apparaat levert deze waarden niet bij een gewone poll."
+    },
+    "entity_not_energy_total_sensor": {
+      "message": "{entity_id} is geen totaal-energieverbruiksensor."
+    }
+  },
+  "issues": {
+    "too_many_devices": {
+      "title": "Te veel apparaten geregistreerd op {device_name}",
+      "description": "Home Assistant kon zich niet registreren bij deze airco omdat de accounttabel van de module vol is. Open de Smart M-Air-app en verwijder een ander geregistreerd apparaat, of reset de module naar de fabrieksinstellingen, en herlaad daarna deze integratie."
     }
   },
   "options": {
@@ -37,18 +75,19 @@
       "init": {
         "description": "Hieronder zijn instellingen die je kan aanpassen voor deze airco.",
         "data": {
-          "host": "Host (IP) address",
           "availability_retry_limit": "Herhaal limiet (minimaal 3)",
           "firmware_update_check": "Firmware-updatecontrole (online)",
-          "service_data": "Servicegegevens",
-          "create_swing_mode_select": "Of er extra zwaaimodus-selectors moeten worden aangemaakt.",
           "indoor_offset": "Binnen offset",
           "outdoor_offset": "Buiten offset",
           "target_offset": "Doel offset",
           "target_offset_cool": "Doel offset (Koelen)",
           "target_offset_heat": "Doel offset (Verwarmen)"
         },
-        "title": "WF-RAC AC connectie info"
+        "title": "WF-RAC opties",
+        "data_description": {
+          "target_offset_cool": "Laat leeg om de algemene doeltemperatuur-offset te gebruiken.",
+          "target_offset_heat": "Laat leeg om de algemene doeltemperatuur-offset te gebruiken."
+        }
       }
     }
   },
@@ -214,7 +253,7 @@
         "name": "Modelnummer"
       },
       "cool_hot_judge": {
-        "name": "Cool Hot Judge"
+        "name": "Koel-/verwarmingsstatus"
       },
       "energy_usage": {
         "name": "Energieverbruik (huidige cyclus)"
@@ -225,11 +264,20 @@
       "compressor_frequency": {
         "name": "Compressorfrequentie"
       },
+      "compressor_frequency_raw": {
+        "name": "Compressorfrequentie (onbewerkt)"
+      },
       "operating_current": {
         "name": "Bedrijfsstroom"
       },
+      "operating_current_raw": {
+        "name": "Bedrijfsstroom (onbewerkt)"
+      },
       "hot_gas_temp": {
         "name": "Heetgastemperatuur"
+      },
+      "hot_gas_temp_raw": {
+        "name": "Heetgastemperatuur (onbewerkt)"
       },
       "eev_pulses": {
         "name": "EEV-pulsen"
@@ -244,19 +292,19 @@
         "name": "Binnenunit warmtewisselaar uitlaattemperatuur"
       },
       "indoor_coil_raw": {
-        "name": "Binnenunit warmtewisselaar sensor (ruw)"
+        "name": "Binnenunit warmtewisselaar temperatuur (onbewerkt)"
       },
       "indoor_coil_outlet_raw": {
-        "name": "Binnenunit warmtewisselaar uitlaatsensor (ruw)"
+        "name": "Binnenunit warmtewisselaar uitlaattemperatuur (onbewerkt)"
       },
       "outdoor_coil_raw": {
-        "name": "Buitenunit warmtewisselaar sensor (ruw)"
+        "name": "Buitenunit warmtewisselaar temperatuur (onbewerkt)"
       },
       "discharge_superheat_raw": {
-        "name": "Persgasoververhitting (ruw)"
+        "name": "Persgas oververhitting (onbewerkt)"
       },
       "protection_raw": {
-        "name": "Beveiligingscode (ruw)"
+        "name": "Beveiligingsnummer (onbewerkt)"
       }
     },
     "binary_sensor": {

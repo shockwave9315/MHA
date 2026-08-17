@@ -6,6 +6,7 @@ import logging
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 
 from homeassistant.const import (
     CONF_HOST,
@@ -21,10 +22,10 @@ from .const import (
     CONF_AVAILABILITY_RETRY_LIMIT,
     CONF_CONNECTION_METHOD,
     CONF_FIRMWARE_UPDATE_CHECK,
-    CONF_SERVICE_DATA,
     CONF_OPERATOR_ID, CONF_CREATE_SWING_MODE_SELECT,
+    DOMAIN,
 )
-from .wfrac.device import AVAILABILITY_FAILURE_LIMIT_MIN, Device
+from .wfrac.device import AVAILABILITY_FAILURE_LIMIT_MIN, Device, registration_full_issue_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # time when the flag was dead code (see create_device_from_entry), so
         # every entry predating v2 has been running with no retry tolerance at
         # all: one failed poll marks the device unavailable. The WF-RAC module
-        # reassociates on its own roughly once an hour (#173), which a 60s poll
+        # reassociates on its own roughly once an hour, which a 60s poll
         # interval turns into a visible outage. Turn the check on, and lift
         # limits below 2, which are equivalent to it being off (Device.
         # _set_availability() needs limit-1 consecutive failures to tolerate).
@@ -117,7 +118,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: MitsubishiWfRacConfigEnt
     # device that's unreachable at startup gets HA's automatic retry-with-backoff
     # rather than a silently "loaded" entry with no working entities.
     if not _device.available:
-        raise ConfigEntryNotReady(f"Could not reach device [{device}]")
+        raise ConfigEntryNotReady(
+            f"Could not reach device [{device}]",
+            translation_domain=DOMAIN,
+            translation_key="cannot_connect",
+            translation_placeholders={"device": device},
+        )
 
     # Persist the discovered connection method (http/https) so we can skip
     # protocol discovery (and its potential extra round-trip) after the next
@@ -146,26 +152,21 @@ async def create_device_from_entry(entry: ConfigEntry, hass: HomeAssistant) -> D
     operator_id: str = entry.data[CONF_OPERATOR_ID]
     port: int = entry.data[CONF_PORT]
     airco_id: str = entry.data[CONF_AIRCO_ID]
-    create_swing_mode_select: bool = entry.data.get(CONF_CREATE_SWING_MODE_SELECT, True)
+    swing_selects_enabled_default: bool = entry.data.get(CONF_CREATE_SWING_MODE_SELECT, True)
     # Off unless the user explicitly opted in via the options flow - this is
     # the only outbound internet call in the integration (see
     # wfrac/device.py's _maybe_check_firmware_update()).
     firmware_update_check_enabled: bool = entry.options.get(CONF_FIRMWARE_UPDATE_CHECK, False)
-    # Off unless opted in, like the firmware check above: requesting these
-    # values costs an extra write to the unit on every poll. See
-    # wfrac/device.py's _maybe_request_service_data().
-    service_data_enabled: bool = entry.options.get(CONF_SERVICE_DATA, False)
     # Floored in Device itself, so an entry that predates the v4 -> v5
     # migration can't run with less tolerance than the module needs.
     availability_failure_limit: int = entry.options.get(
         CONF_AVAILABILITY_RETRY_LIMIT, AVAILABILITY_FAILURE_LIMIT_MIN
     )
     connection_method: str | None = entry.data.get(CONF_CONNECTION_METHOD)
-    _device = Device(hass, name, device, port, device_id, operator_id, airco_id,
-                     create_swing_mode_select,
+    _device = Device(hass, entry, name, device, port, device_id, operator_id, airco_id,
+                     swing_selects_enabled_default,
                      availability_failure_limit=availability_failure_limit,
                      firmware_update_check_enabled=firmware_update_check_enabled,
-                     service_data_enabled=service_data_enabled,
                      connection_method=connection_method)
     return _device
 
@@ -215,3 +216,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: MitsubishiWfRacConfigEn
             temp_device.operator_id,
             temp_device.airco_id,
         )
+
+    # Entry-scoped, so it would otherwise dangle in the repair list forever
+    # pointing at an entry_id that no longer resolves to anything.
+    ir.async_delete_issue(hass, DOMAIN, registration_full_issue_id(entry.entry_id))

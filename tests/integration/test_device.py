@@ -13,6 +13,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from homeassistant.helpers import issue_registry as ir
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.mitsubishi_wf_rac.const import DOMAIN
 from custom_components.mitsubishi_wf_rac.wfrac import device as device_module
 from custom_components.mitsubishi_wf_rac.wfrac.device import (
     AVAILABILITY_FAILURE_LIMIT_MIN,
@@ -22,7 +26,20 @@ from custom_components.mitsubishi_wf_rac.wfrac.models.aircon import (
     Aircon,
     AirconCommands,
 )
-from custom_components.mitsubishi_wf_rac.wfrac.rac_parser import RacParser
+from custom_components.mitsubishi_wf_rac.wfrac.rac_parser import (
+    RacParser,
+    SERVICE_DATA_CODE_BY_FIELD,
+    SERVICE_DATA_CODES,
+    SERVICE_DATA_COMPRESSOR_FREQ,
+    SERVICE_DATA_DISCHARGE_SUPERHEAT_RAW,
+    SERVICE_DATA_EEV_PULSES,
+    SERVICE_DATA_HOT_GAS_TEMP,
+    SERVICE_DATA_INDOOR_COIL_OUTLET_RAW,
+    SERVICE_DATA_INDOOR_COIL_RAW,
+    SERVICE_DATA_OPERATING_CURRENT,
+    SERVICE_DATA_OUTDOOR_COIL_RAW,
+    SERVICE_DATA_PROTECTION_RAW,
+)
 from custom_components.mitsubishi_wf_rac.wfrac.repository import (
     AirconApiError,
     AirconCommandError,
@@ -82,17 +99,22 @@ def _shorten_service_data_timing(monkeypatch, offset_ms: int = 5) -> None:
     )
 
 
+def _activate_service_data_contexts(device, monkeypatch) -> None:
+    monkeypatch.setattr(device, "async_contexts", lambda: set(SERVICE_DATA_CODES))
+
+
 @pytest.fixture
 async def device(hass):
     dev = Device(
         hass,
+        MockConfigEntry(domain=DOMAIN),
         "Test AC",
         "127.0.0.1",
         51443,
         "device-id",
         "operator-id",
         "airco-id",
-        create_swing_mode_select=True,
+        swing_selects_enabled_default=True,
     )
     dev._api = AsyncMock()
     return dev
@@ -116,7 +138,7 @@ async def test_update_none_response_marks_unavailable(device):
 
 async def test_update_api_error_marks_unavailable_and_reregisters(device):
     device._api.get_aircon_stats.side_effect = AirconApiError("boom")
-    device._api.update_account_info = AsyncMock()
+    device._api.update_account_info = AsyncMock(return_value={"result": 0})
     assert await device.update() is False
     assert device.available is False
     device._api.update_account_info.assert_awaited_once()
@@ -133,7 +155,7 @@ async def test_update_transient_unreachable_is_debug_only(device, caplog):
     caplog.clear()
 
     device._api.get_aircon_stats.side_effect = AirconConnectionError("no route")
-    device._api.update_account_info = AsyncMock()
+    device._api.update_account_info = AsyncMock(return_value={"result": 0})
     await device.update()
 
     assert device.available is True
@@ -157,7 +179,7 @@ async def test_update_sustained_unreachable_logs_one_transition(device, caplog):
     caplog.clear()
 
     device._api.get_aircon_stats.side_effect = AirconConnectionError("no route")
-    device._api.update_account_info = AsyncMock()
+    device._api.update_account_info = AsyncMock(return_value={"result": 0})
     for _ in range(10):
         await device.update()
 
@@ -184,7 +206,7 @@ async def test_update_initially_unreachable_logs_threshold_once(device, caplog):
     even though its public availability flag starts out false.
     """
     device._api.get_aircon_stats.side_effect = AirconConnectionError("no route")
-    device._api.update_account_info = AsyncMock()
+    device._api.update_account_info = AsyncMock(return_value={"result": 0})
     for _ in range(5):
         await device.update()
 
@@ -224,7 +246,7 @@ async def test_update_refused_command_reregisters(device):
     out, so this path keeps the re-registration attempt.
     """
     device._api.get_aircon_stats.side_effect = AirconCommandError("refused")
-    device._api.update_account_info = AsyncMock()
+    device._api.update_account_info = AsyncMock(return_value={"result": 0})
     await device.update()
     assert device.available is False
     device._api.update_account_info.assert_awaited_once()
@@ -403,6 +425,39 @@ async def test_async_queue_command_notifies_listeners_even_on_failure(device, mo
         unsubscribe()
 
 
+async def test_home_leave_mode_status_request_does_not_swallow_a_queued_command(
+    device, monkeypatch
+):
+    """Regression: async_request_home_leave_mode_status() used to go through
+    async_queue_command(), so if it landed in the same consolidation window as
+    a real command, both were merged into one AirconStat. to_base64() then
+    saw HomeLeaveModeStatusRequest set and picked status_request_to_byte(),
+    which carries no set-bits at all - so the real command (here: a setpoint
+    change) went out unset and was silently ignored by the unit. Sending the
+    status request directly through set_airco() keeps it out of that merge.
+    """
+    monkeypatch.setattr(device_module, "UPDATE_CONSOLIDATION_PERIOD", timedelta(milliseconds=5))
+    device._api.get_aircon_stats.return_value = _stats_response(OFF_PAYLOAD)
+    await device.update()
+    sent = []
+
+    async def _capture_and_echo(airco_id, command):
+        sent.append(command)
+        return await _echo_send_airco_command(airco_id, command)
+
+    device._api.send_airco_command = AsyncMock(side_effect=_capture_and_echo)
+
+    await device.async_queue_command({AirconCommands.PresetTemp: 25.0})
+    await device.async_request_home_leave_mode_status()
+    await asyncio.sleep(0.05)
+
+    assert len(sent) == 2
+    # The setpoint change must have been sent in its own, separate command
+    # block with its set-bit (DB2[7]) intact.
+    blocks = [base64.b64decode(command)[:18] for command in sent]
+    assert any(block[4] & 0x80 for block in blocks)
+
+
 # --- misc: properties, delete_account(), availability retry, coordinator -
 
 
@@ -412,7 +467,7 @@ async def test_properties_reflect_constructor_args(device):
     assert device.port == 51443
     assert device.device_id == "device-id"
     assert device.airco_id == "airco-id"
-    assert device.create_swing_mode_select is True
+    assert device.swing_selects_enabled_default is True
     assert device.device_info["name"] == "Test AC"
     assert device.device_info["identifiers"] == {("mitsubishi_wf_rac", "airco-id")}
 
@@ -433,8 +488,9 @@ async def test_availability_tolerates_failures_below_limit(hass):
     """The module reassociates to WiFi about once an hour and misses a poll
     while it does; only a sustained run of failures is a real outage."""
     dev = Device(
-        hass, "Test AC", "127.0.0.1", 51443, "device-id", "operator-id", "airco-id",
-        create_swing_mode_select=True,
+        hass, MockConfigEntry(domain=DOMAIN), "Test AC", "127.0.0.1", 51443,
+        "device-id", "operator-id", "airco-id",
+        swing_selects_enabled_default=True,
     )
     dev._api = AsyncMock()
     dev._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
@@ -442,7 +498,7 @@ async def test_availability_tolerates_failures_below_limit(hass):
     assert dev.available is True
 
     dev._api.get_aircon_stats.side_effect = AirconApiError("boom")
-    dev._api.update_account_info = AsyncMock()
+    dev._api.update_account_info = AsyncMock(return_value={"result": 0})
 
     await dev.update()
     assert dev.available is True  # 1st failure - within tolerance
@@ -457,19 +513,21 @@ async def test_availability_limit_can_be_raised_but_not_lowered(hass):
     enough. Below the floor it only ever produced phantom outages, so a lower
     value is clamped rather than honoured."""
     raised = Device(
-        hass, "Test AC", "127.0.0.1", 51443, "device-id", "operator-id", "airco-id",
-        create_swing_mode_select=True, availability_failure_limit=5,
+        hass, MockConfigEntry(domain=DOMAIN), "Test AC", "127.0.0.1", 51443,
+        "device-id", "operator-id", "airco-id",
+        swing_selects_enabled_default=True, availability_failure_limit=5,
     )
     assert raised._availability_failure_limit == 5
 
     lowered = Device(
-        hass, "Test AC", "127.0.0.1", 51443, "device-id", "operator-id", "airco-id",
-        create_swing_mode_select=True, availability_failure_limit=1,
+        hass, MockConfigEntry(domain=DOMAIN), "Test AC", "127.0.0.1", 51443,
+        "device-id", "operator-id", "airco-id",
+        swing_selects_enabled_default=True, availability_failure_limit=1,
     )
     assert lowered._availability_failure_limit == AVAILABILITY_FAILURE_LIMIT_MIN
 
     lowered._api = AsyncMock()
-    lowered._api.update_account_info = AsyncMock()
+    lowered._api.update_account_info = AsyncMock(return_value={"result": 0})
     lowered._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     await lowered.update()
 
@@ -482,11 +540,12 @@ async def test_availability_recovers_and_resets_the_failure_count(hass):
     """A success in between must clear the run, not leave it part-way to the
     limit."""
     dev = Device(
-        hass, "Test AC", "127.0.0.1", 51443, "device-id", "operator-id", "airco-id",
-        create_swing_mode_select=True,
+        hass, MockConfigEntry(domain=DOMAIN), "Test AC", "127.0.0.1", 51443,
+        "device-id", "operator-id", "airco-id",
+        swing_selects_enabled_default=True,
     )
     dev._api = AsyncMock()
-    dev._api.update_account_info = AsyncMock()
+    dev._api.update_account_info = AsyncMock(return_value={"result": 0})
     dev._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     await dev.update()
 
@@ -505,6 +564,7 @@ async def test_availability_recovers_and_resets_the_failure_count(hass):
     assert dev.available is True  # count restarted, not resumed at 2
     await dev.update()
     assert dev.available is False
+
 
 
 # --- firmware update check (wfrac/firmware_check.py) ----------------------
@@ -555,9 +615,9 @@ async def test_update_detects_available_firmware_update(device, monkeypatch):
 
 
 async def test_update_does_not_flag_downgrade_or_equal_version_as_update(device, monkeypatch):
-    # Strictly-greater-than only (see FUNDE.md's updateFirmware section): the
-    # module silently no-ops a requested version <= its current one, so
-    # neither "equal" nor "older" may be reported as an available update.
+    # Strictly-greater-than only: the module silently no-ops a requested
+    # version <= its current one, so neither "equal" nor "older" may be
+    # reported as an available update.
     device._firmware_update_check_enabled = True
     fetch = AsyncMock(return_value={"wireless": "025", "mcu": "200"})
     monkeypatch.setattr(device_module, "fetch_latest_firmware", fetch)
@@ -602,15 +662,10 @@ async def test_update_firmware_check_failure_leaves_state_unknown(device, monkey
     assert device.latest_wireless_firmware_version is None
 
 
-# --- service data request (opt-in, rac_parser.SERVICE_DATA_CODES) ---------
+# --- operation-data request (rac_parser.SERVICE_DATA_CODES) ----------------
 
 
-async def test_update_does_not_request_service_data_when_disabled_by_default(device, monkeypatch):
-    # Unlike the firmware check, this stays on the local network - but it's
-    # still an extra setAirconStat write on top of the regular read-only
-    # poll, so it must stay off unless explicitly enabled via the
-    # service_data option (see const.py's CONF_SERVICE_DATA).
-    assert device.service_data_enabled is False
+async def test_update_does_not_request_service_data_without_active_entities(device, monkeypatch):
     monkeypatch.setattr(device_module, "UPDATE_CONSOLIDATION_PERIOD", timedelta(milliseconds=5))
     device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     device._api.send_airco_command = AsyncMock(side_effect=_echo_send_airco_command)
@@ -621,8 +676,8 @@ async def test_update_does_not_request_service_data_when_disabled_by_default(dev
     device._api.send_airco_command.assert_not_awaited()
 
 
-async def test_update_requests_service_data_when_enabled(device, monkeypatch):
-    device._service_data_enabled = True
+async def test_update_requests_service_data_for_active_entities(device, monkeypatch):
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch)
     device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     device._api.send_airco_command = AsyncMock(side_effect=_echo_send_airco_command)
@@ -633,11 +688,135 @@ async def test_update_requests_service_data_when_enabled(device, monkeypatch):
     device._api.send_airco_command.assert_awaited_once()
 
 
+async def test_service_data_request_uses_active_segment_codes(device, monkeypatch):
+    _shorten_service_data_timing(monkeypatch)
+    monkeypatch.setattr(
+        device,
+        "async_contexts",
+        lambda: {
+            SERVICE_DATA_HOT_GAS_TEMP,
+            SERVICE_DATA_EEV_PULSES,
+            SERVICE_DATA_EEV_PULSES,
+        },
+    )
+    set_airco = AsyncMock()
+    device.set_airco = set_airco
+
+    device._maybe_request_service_data()
+    await asyncio.sleep(0.05)
+
+    set_airco.assert_awaited_once_with(
+        {
+            AirconCommands.ServiceDataStatusRequest: (
+                SERVICE_DATA_EEV_PULSES,
+                SERVICE_DATA_HOT_GAS_TEMP,
+            )
+        },
+        log_failure=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "code"),
+    (
+        ("CompressorFrequencyRaw", SERVICE_DATA_COMPRESSOR_FREQ),
+        ("OperatingCurrentRaw", SERVICE_DATA_OPERATING_CURRENT),
+        ("HotGasTempRaw", SERVICE_DATA_HOT_GAS_TEMP),
+        ("IndoorCoilRaw", SERVICE_DATA_INDOOR_COIL_RAW),
+        ("IndoorCoilOutletRaw", SERVICE_DATA_INDOOR_COIL_OUTLET_RAW),
+        ("OutdoorCoilRaw", SERVICE_DATA_OUTDOOR_COIL_RAW),
+        ("DischargeSuperheatRaw", SERVICE_DATA_DISCHARGE_SUPERHEAT_RAW),
+        ("ProtectionRaw", SERVICE_DATA_PROTECTION_RAW),
+    ),
+)
+async def test_raw_service_data_sensor_requests_its_segment_code(device, monkeypatch, field, code):
+    _shorten_service_data_timing(monkeypatch)
+    assert SERVICE_DATA_CODE_BY_FIELD[field] == code
+    monkeypatch.setattr(device, "async_contexts", lambda: {code})
+    device.set_airco = set_airco = AsyncMock()
+
+    device._maybe_request_service_data()
+    await asyncio.sleep(0.05)
+
+    set_airco.assert_awaited_once_with(
+        {AirconCommands.ServiceDataStatusRequest: (code,)}, log_failure=False
+    )
+
+
+async def test_service_data_request_does_not_overlap_an_active_request(device, monkeypatch):
+    _activate_service_data_contexts(device, monkeypatch)
+    device._service_data_task = MagicMock()
+    device._service_data_task.done.return_value = False
+
+    device._maybe_request_service_data()
+
+    assert device._last_service_data_request is None
+
+
+async def test_add_account_returns_none_on_api_error(device):
+    device._api.update_account_info.side_effect = AirconApiError("failed")
+
+    assert await device.add_account() is None
+
+
+# --- add_account() / registration-full repair issue -----------------------
+
+
+def _issue(device):
+    return ir.async_get(device._hass).async_get_issue(
+        DOMAIN, device_module.registration_full_issue_id(device.config_entry.entry_id)
+    )
+
+
+async def test_add_account_reports_repair_issue_when_table_is_full(device):
+    device._api.update_account_info.return_value = {"result": 2}
+
+    await device.add_account()
+
+    assert _issue(device) is not None
+
+
+async def test_add_account_clears_repair_issue_once_registration_succeeds(device):
+    device._api.update_account_info.return_value = {"result": 2}
+    await device.add_account()
+    assert _issue(device) is not None
+
+    device._api.update_account_info.return_value = {"result": 0}
+    await device.add_account()
+
+    assert _issue(device) is None
+
+
+async def test_add_account_does_not_report_an_issue_on_ordinary_success(device):
+    device._api.update_account_info.return_value = {"result": 0}
+
+    await device.add_account()
+
+    assert _issue(device) is None
+
+
+async def test_update_reregister_reports_repair_issue_when_table_stays_full(device):
+    device._api.get_aircon_stats.side_effect = AirconApiError("evicted")
+    device._api.update_account_info.return_value = {"result": 2}
+
+    await device.update()
+
+    assert _issue(device) is not None
+
+
+async def test_set_airco_raises_when_refresh_does_not_provide_state(device):
+    device._airco = None
+    device._api.get_aircon_stats.return_value = None
+
+    with pytest.raises(ValueError, match="Airco object is empty"):
+        await device.set_airco({})
+
+
 async def test_service_data_request_is_offset_from_the_poll(device, monkeypatch):
     """It must not ride straight off the back of the status poll - landing a
     second write that close is what the unit refuses with HTTP 501 (#230).
     """
-    device._service_data_enabled = True
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch, offset_ms=40)
     device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     device._api.send_airco_command = AsyncMock(side_effect=_echo_send_airco_command)
@@ -650,37 +829,65 @@ async def test_service_data_request_is_offset_from_the_poll(device, monkeypatch)
     device._api.send_airco_command.assert_awaited_once()
 
 
-async def test_service_data_request_writes_the_state_the_unit_has_now(
-    device, monkeypatch
-):
-    """The request rides on a full-state write, so a stale snapshot undoes
-    whatever was changed at the unit since the poll it came from (#241).
+async def test_service_data_request_carries_no_set_bits(device, monkeypatch):
+    """The request only reads, so its command block leaves every set-bit clear
+    and the unit applies none of it - that is what keeps a change made at the
+    unit itself from being undone a minute later (#241/#250).
     """
-    device._service_data_enabled = True
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch, offset_ms=40)
     device._api.get_aircon_stats.return_value = _stats_response(OFF_PAYLOAD)
+    sent = []
+
+    async def _capture(airco_id, command):
+        sent.append(command)
+        return _stats_response(OFF_PAYLOAD)
+
+    device._api.send_airco_command = AsyncMock(side_effect=_capture)
+
+    await device.update()
+    await asyncio.sleep(0.08)
+
+    assert len(sent) == 1
+    block = base64.b64decode(sent[0])[:18]
+    # Power DB0[1], mode DB0[5], vane DB0[7]/DB1[7], fan DB1[3], setpoint
+    # DB2[7]: without these the values in the frame mean nothing to the unit.
+    assert block[2] == 0
+    assert block[3] == 0
+    assert block[4] == 0
+    assert block[10] == 0
+    assert block[11] == 0
+    assert block[12] == 0
+    # ...but byte 5 still says "keep using your own room sensor", and byte 8 is
+    # carried as usual because it has no set-bit of its own.
+    assert block[5] == 0xFF
+
+
+async def test_service_data_request_does_not_re_read_before_sending(
+    device, monkeypatch
+):
+    """One read per cycle. The refresh that used to sit in front of the write
+    (#247) is unnecessary now that the write applies nothing.
+    """
+    _activate_service_data_contexts(device, monkeypatch)
+    _shorten_service_data_timing(monkeypatch, offset_ms=40)
+    device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     device._api.send_airco_command = AsyncMock(side_effect=_echo_send_airco_command)
 
     await device.update()
-    assert device.airco.Operation is False
-
-    # Someone switches the unit on at the remote, in the gap between the poll
-    # and the request.
-    device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     await asyncio.sleep(0.08)
 
-    # Two reads: the poll, and the refresh right before the write. The echoing
-    # fake reports back whatever was sent, so a stale snapshot would show up
-    # here as the unit having been switched off again.
-    assert device._api.get_aircon_stats.await_count == 2
+    assert device._api.get_aircon_stats.await_count == 1
     device._api.send_airco_command.assert_awaited_once()
-    assert device.airco.Operation is True
 
 
-async def test_service_data_request_skips_one_cycle_after_a_change_at_the_unit(
+async def test_service_data_request_runs_after_a_change_at_the_unit(
     device, monkeypatch
 ):
-    device._service_data_enabled = True
+    """No cycle is skipped any more: there is nothing left to protect against,
+    and skipping cost a cycle of every operation-data sensor.
+    """
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch)
     changed_at_the_unit = _stats_response(ON_COOL_PAYLOAD) | {"updatedBy": "aircon"}
     device._api.get_aircon_stats.return_value = changed_at_the_unit
@@ -689,19 +896,11 @@ async def test_service_data_request_skips_one_cycle_after_a_change_at_the_unit(
     await device.update()
     await asyncio.sleep(0.05)
 
-    device._api.send_airco_command.assert_not_awaited()
-
-    # ...but only the one cycle. Nothing except a local write clears updatedBy,
-    # so skipping while it merely still says "aircon" would skip for ever.
-    device._last_service_data_request = None
-    await device.update()
-    await asyncio.sleep(0.05)
-
     device._api.send_airco_command.assert_awaited_once()
 
 
 async def test_service_data_request_is_retried_once_when_refused(device, monkeypatch):
-    device._service_data_enabled = True
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch)
     device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     calls = []
@@ -721,7 +920,7 @@ async def test_service_data_request_is_retried_once_when_refused(device, monkeyp
 
 
 async def test_service_data_request_gives_up_after_the_retry(device, monkeypatch, caplog):
-    device._service_data_enabled = True
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch)
     device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     device._api.send_airco_command = AsyncMock(
@@ -741,7 +940,7 @@ async def test_service_data_request_gives_up_after_the_retry(device, monkeypatch
 
 
 async def test_update_service_data_request_is_rate_limited(device, monkeypatch):
-    device._service_data_enabled = True
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch)
     device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     device._api.send_airco_command = AsyncMock(side_effect=_echo_send_airco_command)
@@ -761,7 +960,7 @@ async def test_service_data_survives_a_poll_that_answered_early(device, monkeypa
     limit against the full interval dropped those cycles (#230, 6 of 36 on the
     reporting unit).
     """
-    device._service_data_enabled = True
+    _activate_service_data_contexts(device, monkeypatch)
     _shorten_service_data_timing(monkeypatch)
     device._api.get_aircon_stats.return_value = _stats_response(ON_COOL_PAYLOAD)
     device._api.send_airco_command = AsyncMock(side_effect=_echo_send_airco_command)
@@ -911,12 +1110,26 @@ async def test_async_update_data_counts_timeouts_as_connection_failures(
 
 async def test_service_data_is_carried_forward_between_polls(device):
     device._airco.CompressorFrequency = 40.0
-    device._last_service_data_response = {"CompressorFrequency": datetime.now()}
+    device._last_service_data_response = datetime.now()
     new_airco = Aircon()
 
     device._carry_forward_service_data(new_airco)
 
     assert new_airco.CompressorFrequency == 40.0
+
+
+async def test_raw_service_data_is_carried_forward_between_polls(device):
+    device._airco.CompressorFrequencyRaw = 0x10C8
+    device._airco.OperatingCurrentRaw = 0x04
+    device._airco.HotGasTempRaw = 0x15
+    device._last_service_data_response = datetime.now()
+    new_airco = Aircon()
+
+    device._carry_forward_service_data(new_airco)
+
+    assert new_airco.CompressorFrequencyRaw == 0x10C8
+    assert new_airco.OperatingCurrentRaw == 0x04
+    assert new_airco.HotGasTempRaw == 0x15
 
 
 async def test_unconvertible_coil_reading_is_not_carried_forward(device):
@@ -928,11 +1141,7 @@ async def test_unconvertible_coil_reading_is_not_carried_forward(device):
     """
     device._airco.IndoorCoilTemp = 37.5
     device._airco.IndoorCoilRaw = 119
-    now = datetime.now()
-    device._last_service_data_response = {
-        "IndoorCoilTemp": now,
-        "IndoorCoilRaw": now,
-    }
+    device._last_service_data_response = datetime.now()
     new_airco = Aircon()
     new_airco.IndoorCoilRaw = 252  # arrived, but off the end of the table
 
@@ -948,11 +1157,7 @@ async def test_missing_coil_segment_is_still_carried_forward(device):
     """
     device._airco.IndoorCoilTemp = 21.5
     device._airco.IndoorCoilRaw = 88
-    now = datetime.now()
-    device._last_service_data_response = {
-        "IndoorCoilTemp": now,
-        "IndoorCoilRaw": now,
-    }
+    device._last_service_data_response = datetime.now()
     new_airco = Aircon()
     new_airco.CompressorFrequency = 40.0  # some other segment did arrive
 
@@ -967,10 +1172,9 @@ async def test_service_data_expires_when_nothing_fresh_arrives(device):
     reporting a frozen value that looks live.
     """
     device._airco.CompressorFrequency = 40.0
-    device._last_service_data_response = {
-        "CompressorFrequency": datetime.now()
-        - (device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1))
-    }
+    device._last_service_data_response = datetime.now() - (
+        device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1)
+    )
     new_airco = Aircon()
 
     device._carry_forward_service_data(new_airco)
@@ -978,25 +1182,20 @@ async def test_service_data_expires_when_nothing_fresh_arrives(device):
     assert new_airco.CompressorFrequency is None
 
 
-async def test_fresh_service_field_does_not_restart_other_fields_clock(device):
+async def test_fresh_service_data_restarts_the_clock(device):
     device._airco.CompressorFrequency = 40.0
     device._airco.HotGasTemp = 50.0
-    old = datetime.now() - (
+    device._last_service_data_response = datetime.now() - (
         device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1)
     )
-    device._last_service_data_response = {
-        "CompressorFrequency": old,
-        "HotGasTemp": old,
-    }
     new_airco = Aircon()
-    new_airco.CompressorFrequency = 45.0
+    new_airco.CompressorFrequency = 45.0  # this poll carried the segments
 
     device._carry_forward_service_data(new_airco)
 
     assert new_airco.CompressorFrequency == 45.0
-    # A live compressor-frequency segment must not make a missing, expired hot
-    # gas segment look current.
-    assert new_airco.HotGasTemp is None
+    # The rest of the block comes with it, so they are carried again.
+    assert new_airco.HotGasTemp == 50.0
 
 
 async def test_expiring_service_data_warns_once_and_reports_the_recovery(
@@ -1005,10 +1204,9 @@ async def test_expiring_service_data_warns_once_and_reports_the_recovery(
     """The refusals themselves are routine; running out of values is not."""
     caplog.set_level("DEBUG", logger=device_module.__name__)
     device._airco.CompressorFrequency = 40.0
-    device._last_service_data_response = {
-        "CompressorFrequency": datetime.now()
-        - (device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1))
-    }
+    device._last_service_data_response = datetime.now() - (
+        device_module.SERVICE_DATA_MAX_AGE + timedelta(seconds=1)
+    )
 
     for _ in range(3):
         device._carry_forward_service_data(Aircon())

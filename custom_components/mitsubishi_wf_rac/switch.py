@@ -5,16 +5,23 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.switch import SwitchEntity
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import MitsubishiWfRacConfigEntry
 from .wfrac.device import Device
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+PARALLEL_UPDATES = 1
 
 
-async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: MitsubishiWfRacConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Setup switch entries"""
 
     device: Device = entry.runtime_data.device
@@ -27,7 +34,7 @@ async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_e
     async_add_entities(entities)
 
 
-def _async_remove_home_leave_mode_switch(hass, device: Device) -> None:
+def _async_remove_home_leave_mode_switch(hass: HomeAssistant, device: Device) -> None:
     """Drop the former Home Leave Mode switch from the entity registry.
 
     That switch only ever faked Home Leave mode by pushing the heat target
@@ -45,13 +52,13 @@ def _async_remove_home_leave_mode_switch(hass, device: Device) -> None:
         registry.async_remove(entity_id)
 
 
-def _async_remove_self_clean_switch(hass, device: Device) -> None:
+def _async_remove_self_clean_switch(hass: HomeAssistant, device: Device) -> None:
     """Drop the former Self Clean switch from the entity registry.
 
     The unit's real self-clean cycle can only be started locally via the IR
-    remote - the WiFi module offers no way to trigger it (see #209), so the
-    switch never did anything. Removing it here keeps it from lingering as an
-    unavailable leftover in dashboards and automations.
+    remote - the WiFi module offers no way to trigger it, so the switch never
+    did anything. Removing it here keeps it from lingering as an unavailable
+    leftover in dashboards and automations.
     """
     registry = er.async_get(hass)
     entity_id = registry.async_get_entity_id(

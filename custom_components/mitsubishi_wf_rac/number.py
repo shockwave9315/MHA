@@ -7,7 +7,9 @@ import logging
 
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.const import UnitOfTemperature
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import MitsubishiWfRacConfigEntry
 from .entity import WfRacEntity
@@ -16,19 +18,20 @@ from .wfrac.models.aircon import HomeLeaveModeSetting
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+PARALLEL_UPDATES = 1
 
 # Same bounds as the temp_rule_*/temp_setting_* fields in services.yaml's
 # set_home_leave_mode action.
-HOME_LEAVE_TEMP_BOUNDS = {
-    ("cooling", "TempRule"): (10.0, 50.0),
-    ("cooling", "TempSetting"): (10.0, 50.0),
-    ("heating", "TempRule"): (-20.0, 30.0),
-    ("heating", "TempSetting"): (0.0, 30.0),
-}
+HOME_LEAVE_TEMP_MIN = 10.0
+HOME_LEAVE_TEMP_MAX = 50.0
 HOME_LEAVE_TEMP_STEP = 0.5
 
 
-async def async_setup_entry(_hass, entry: MitsubishiWfRacConfigEntry, async_add_entities):
+async def async_setup_entry(
+    _hass: HomeAssistant,
+    entry: MitsubishiWfRacConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Setup number entries"""
 
     device: Device = entry.runtime_data.device
@@ -68,6 +71,8 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
     _attr_has_entity_name: bool = True
     _attr_device_class = NumberDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_native_min_value = HOME_LEAVE_TEMP_MIN
+    _attr_native_max_value = HOME_LEAVE_TEMP_MAX
     _attr_native_step = HOME_LEAVE_TEMP_STEP
     _attr_mode = NumberMode.BOX
 
@@ -77,9 +82,6 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
         super().__init__(device)
         self._mode = mode
         self._attribute = attribute
-        self._attr_native_min_value, self._attr_native_max_value = HOME_LEAVE_TEMP_BOUNDS[
-            (mode, attribute)
-        ]
         slug = "temp_rule" if attribute == "TempRule" else "temp_setting"
         self._attr_translation_key = f"home_leave_{mode}_{slug}"
         self._attr_unique_id = (
@@ -111,12 +113,24 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
             raise HomeAssistantError(
                 "Home Leave Mode values are unknown yet - call the climate "
                 "entity's 'Request Home Leave Mode status' action once "
-                "first, the unit doesn't include them in a plain poll."
+                "first, the unit doesn't include them in a plain poll.",
+                translation_domain=DOMAIN,
+                translation_key="home_leave_mode_status_unknown",
             )
-        if self._mode == "cooling":
-            cooling = replace(cooling, **{self._attribute: value})
+        # Named kwargs rather than replace(setting, **{self._attribute: value}):
+        # HomeLeaveModeSetting also has an AirFlow: int field, so a dynamic
+        # **{str: float} unpacking can't statically prove it only ever
+        # touches the two float fields this class is instantiated for.
+        if self._attribute == "TempRule":
+            if self._mode == "cooling":
+                cooling = replace(cooling, TempRule=value)
+            else:
+                heating = replace(heating, TempRule=value)
         else:
-            heating = replace(heating, **{self._attribute: value})
+            if self._mode == "cooling":
+                cooling = replace(cooling, TempSetting=value)
+            else:
+                heating = replace(heating, TempSetting=value)
         await self._device.async_set_home_leave_mode(cooling, heating)
         self._attr_native_value = value
         self.async_write_ha_state()

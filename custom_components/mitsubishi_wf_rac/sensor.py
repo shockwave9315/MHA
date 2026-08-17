@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+from decimal import Decimal
 import logging
 from typing import Any, Self
 
@@ -15,9 +16,11 @@ from homeassistant.components.sensor import (
     SensorExtraStoredData,
 )
 from homeassistant.components.sensor.const import SensorDeviceClass, SensorStateClass
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import entity_platform
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.const import (
     PERCENTAGE,
     UnitOfElectricCurrent,
@@ -31,13 +34,16 @@ from homeassistant.const import (
 from homeassistant.helpers import entity_registry as er
 
 from .entity import WfRacEntity
-from .target_offset import resolve_target_offset_from_operation
 from .wfrac.device import Device
+from .wfrac.rac_parser import SERVICE_DATA_CODE_BY_FIELD
 from .const import (
     ATTR_TARGET_TEMPERATURE,
     ATTR_COMPRESSOR_FREQUENCY,
+    ATTR_COMPRESSOR_FREQUENCY_RAW,
     ATTR_OPERATING_CURRENT,
+    ATTR_OPERATING_CURRENT_RAW,
     ATTR_HOT_GAS_TEMP,
+    ATTR_HOT_GAS_TEMP_RAW,
     ATTR_EEV_PULSES,
     ATTR_EEV_POSITION,
     ATTR_INDOOR_COIL_TEMP,
@@ -62,15 +68,19 @@ from .const import (
     ATTR_COOL_HOT_JUDGE,
     CONF_INDOOR_OFFSET,
     CONF_OUTDOOR_OFFSET,
-    CONF_SERVICE_DATA,
     SERVICE_SET_ENERGY_TOTAL,
     SIGNAL_SET_ENERGY_TOTAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
+PARALLEL_UPDATES = 1
 
 
-async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: MitsubishiWfRacConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Setup sensor entries"""
 
     device: Device = entry.runtime_data.device
@@ -85,17 +95,18 @@ async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_e
         # plumbing (ids, session, addressing) that only matters when
         # diagnosing a connection problem. All of these come out of the
         # regular poll, so enabling one costs no extra request.
-        DiagnosticsSensor(device, "Airco ID", CONF_AIRCO_ID, True),
+        DiagnosticsSensor(device, "Airco ID", CONF_AIRCO_ID),
         DiagnosticsSensor(device, "Operator ID", CONF_OPERATOR_ID),
         DiagnosticsSensor(device, "Device ID", ATTR_DEVICE_ID),
         DiagnosticsSensor(device, "IP", CONF_HOST),
         DiagnosticsSensor(device, "Accounts", ATTR_CONNECTED_ACCOUNTS),
         DiagnosticsSensor(device, "Error", CONF_ERROR, True),
         DiagnosticsSensor(device, "Updated By", ATTR_UPDATED_BY, True),
-        DiagnosticsSensor(device, "Account Expires", ATTR_ACCOUNT_EXPIRES, True),
-        # Off until it is understood: reads a constant 1 on both test units
-        # regardless of what the machine is doing, so it does not currently
-        # track the unit's LED - see todo.md.
+        DiagnosticsSensor(device, "Account Expires", ATTR_ACCOUNT_EXPIRES),
+        # Off by default: mirrors the unit's own "LED ON" display-light
+        # setting (see wf-rac-module-reference.md §2.8), which nobody has
+        # switched off on either test unit - a constant 1 is the default,
+        # not a broken read.
         DiagnosticsSensor(device, "LED Status", ATTR_LED_STATUS),
         DiagnosticsSensor(device, "Auto Heating", ATTR_AUTO_HEATING, True),
         DiagnosticsSensor(device, "Model Nr", ATTR_MODEL_NR),
@@ -105,28 +116,25 @@ async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_e
         entities.append(EnergySensor(device))
         entities.append(EnergyTotalSensor(device))
 
-    # Tied to CONF_SERVICE_DATA rather than merely disabled by default: the
-    # option is what makes Device request these values at all, so without it
-    # the entities could only ever read `unknown`. Changing the option reloads
-    # the entry (see async_update_options), so they appear and disappear with
-    # it.
-    if entry.options.get(CONF_SERVICE_DATA, False):
-        entities += [
-            ServiceDataSensor(device, ATTR_COMPRESSOR_FREQUENCY),
-            ServiceDataSensor(device, ATTR_OPERATING_CURRENT),
-            ServiceDataSensor(device, ATTR_HOT_GAS_TEMP),
-            ServiceDataSensor(device, ATTR_EEV_PULSES),
-            ServiceDataSensor(device, ATTR_EEV_POSITION),
-            ServiceDataSensor(device, ATTR_INDOOR_COIL_TEMP),
-            ServiceDataSensor(device, ATTR_INDOOR_COIL_OUTLET_TEMP),
-            ServiceDataSensor(device, ATTR_INDOOR_COIL_RAW),
-            ServiceDataSensor(device, ATTR_INDOOR_COIL_OUTLET_RAW),
-            ServiceDataSensor(device, ATTR_OUTDOOR_COIL_RAW),
-            ServiceDataSensor(device, ATTR_DISCHARGE_SUPERHEAT_RAW),
-            ServiceDataSensor(device, ATTR_PROTECTION_RAW),
-        ]
-    else:
-        _async_remove_service_data_sensors(hass, device)
+    # Active operation-data entities register their segment code with Device,
+    # which requests only the segments needed by enabled entities.
+    entities += [
+        ServiceDataSensor(device, ATTR_COMPRESSOR_FREQUENCY),
+        ServiceDataSensor(device, ATTR_COMPRESSOR_FREQUENCY_RAW),
+        ServiceDataSensor(device, ATTR_OPERATING_CURRENT),
+        ServiceDataSensor(device, ATTR_OPERATING_CURRENT_RAW),
+        ServiceDataSensor(device, ATTR_HOT_GAS_TEMP),
+        ServiceDataSensor(device, ATTR_HOT_GAS_TEMP_RAW),
+        ServiceDataSensor(device, ATTR_EEV_PULSES),
+        ServiceDataSensor(device, ATTR_EEV_POSITION),
+        ServiceDataSensor(device, ATTR_INDOOR_COIL_TEMP),
+        ServiceDataSensor(device, ATTR_INDOOR_COIL_OUTLET_TEMP),
+        ServiceDataSensor(device, ATTR_INDOOR_COIL_RAW),
+        ServiceDataSensor(device, ATTR_INDOOR_COIL_OUTLET_RAW),
+        ServiceDataSensor(device, ATTR_OUTDOOR_COIL_RAW),
+        ServiceDataSensor(device, ATTR_DISCHARGE_SUPERHEAT_RAW),
+        ServiceDataSensor(device, ATTR_PROTECTION_RAW),
+    ]
 
     _async_remove_home_leave_mode_sensors(hass, device)
 
@@ -139,7 +147,7 @@ async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_e
     )
 
 
-async def _async_set_energy_total(entity: SensorEntity, call) -> None:
+async def _async_set_energy_total(entity: SensorEntity, call: ServiceCall) -> None:
     """Entity-service handler for SERVICE_SET_ENERGY_TOTAL.
 
     Registered as a callable rather than a method name so targeting any other
@@ -148,48 +156,22 @@ async def _async_set_energy_total(entity: SensorEntity, call) -> None:
     """
     if not isinstance(entity, EnergyTotalSensor):
         raise ServiceValidationError(
-            f"{entity.entity_id} is not an Energy Usage Total sensor"
+            f"{entity.entity_id} is not an Energy Usage Total sensor",
+            translation_domain=DOMAIN,
+            translation_key="entity_not_energy_total_sensor",
+            translation_placeholders={"entity_id": entity.entity_id},
         )
     await entity.async_set_total(call.data["value"])
 
 
-def _async_remove_service_data_sensors(hass, device: Device) -> None:
-    """Drop the operation-data sensors once CONF_SERVICE_DATA is turned off.
-
-    Without this they would linger in the registry reading `unknown` forever,
-    since nothing requests their values any more.
-    """
-    registry = er.async_get(hass)
-    for custom_type in (
-        ATTR_COMPRESSOR_FREQUENCY,
-        ATTR_OPERATING_CURRENT,
-        ATTR_HOT_GAS_TEMP,
-        ATTR_EEV_PULSES,
-        ATTR_EEV_POSITION,
-        ATTR_INDOOR_COIL_TEMP,
-        ATTR_INDOOR_COIL_OUTLET_TEMP,
-        ATTR_INDOOR_COIL_RAW,
-        ATTR_INDOOR_COIL_OUTLET_RAW,
-        ATTR_OUTDOOR_COIL_RAW,
-        ATTR_DISCHARGE_SUPERHEAT_RAW,
-        ATTR_PROTECTION_RAW,
-    ):
-        entity_id = registry.async_get_entity_id(
-            "sensor", DOMAIN, f"{DOMAIN}-{device.airco_id}-{custom_type}-sensor"
-        )
-        if entity_id:
-            _LOGGER.debug("Removing service data sensor %s", entity_id)
-            registry.async_remove(entity_id)
-
-
-def _async_remove_home_leave_mode_sensors(hass, device: Device) -> None:
+def _async_remove_home_leave_mode_sensors(hass: HomeAssistant, device: Device) -> None:
     """Drop the former Home Leave Mode diagnostic sensors from the entity
     registry.
 
     Replaced by writable entities on the Controls section of the device page:
     HomeLeaveModeNumber (TempRule/TempSetting) in number.py, the AirFlow
     selects in select.py - editable directly instead of only via the
-    set_home_leave_mode action, see todo.md.
+    set_home_leave_mode action.
     """
     registry = er.async_get(hass)
     for mode in ("cooling", "heating"):
@@ -210,7 +192,7 @@ class DiagnosticsSensor(WfRacEntity, SensorEntity):
     _attr_has_entity_name: bool = True
 
     def __init__(
-        self, device: Device, name: str, custom_type: str, enable=False
+        self, device: Device, name: str, custom_type: str, enable: bool = False
     ) -> None:
         """Initialize the sensor."""
         super().__init__(device)
@@ -282,7 +264,7 @@ class TemperatureSensor(WfRacEntity, SensorEntity):
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_has_entity_name: bool = True
 
-    def __init__(self, device: Device, name: str, custom_type: str, enable=True) -> None:
+    def __init__(self, device: Device, name: str, custom_type: str, enable: bool = True) -> None:
         """Initialize the sensor."""
         super().__init__(device)
         self._custom_type = custom_type
@@ -301,17 +283,16 @@ class TemperatureSensor(WfRacEntity, SensorEntity):
 
     def _update_state(self) -> None:
         if self._custom_type == ATTR_INSIDE_TEMPERATURE:
-            indoor_offset = self._device.config_entry.options.get(CONF_INDOOR_OFFSET, 0.0)
+            indoor_offset = self._device.options.get(CONF_INDOOR_OFFSET, 0.0)
             self._attr_native_value = self._device.airco.IndoorTemp + indoor_offset
         elif self._custom_type == ATTR_OUTSIDE_TEMPERATURE:
-            outdoor_offset = self._device.config_entry.options.get(CONF_OUTDOOR_OFFSET, 0.0)
+            outdoor_offset = self._device.options.get(CONF_OUTDOOR_OFFSET, 0.0)
             self._attr_native_value = self._device.airco.OutdoorTemp + outdoor_offset
         elif self._custom_type == ATTR_TARGET_TEMPERATURE:
-            # Use the exact same mode-aware resolver as climate.py so the
-            # optional target sensor cannot disagree with the climate entity.
-            target_offset = resolve_target_offset_from_operation(
-                self._device.config_entry.options, self._device.airco.OperationMode
-            )
+            # Kept symmetric with climate.py's target_temperature by going
+            # through the same resolver, per-mode overrides included - see
+            # WfRacEntity._resolve_target_offset().
+            target_offset = self._resolve_target_offset(self._hvac_mode_from_operation)
             self._attr_native_value = self._device.airco.PresetTemp + target_offset
 
 
@@ -320,8 +301,8 @@ class EnergySensor(WfRacEntity, SensorEntity):
 
     _attr_translation_key = "energy_usage"
     _attr_native_unit_of_measurement: str | None = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_device_class: SensorDeviceClass | str | None = SensorDeviceClass.ENERGY
-    _attr_state_class: SensorStateClass | str | None = SensorStateClass.TOTAL_INCREASING
+    _attr_device_class: SensorDeviceClass | None = SensorDeviceClass.ENERGY
+    _attr_state_class: SensorStateClass | None = SensorStateClass.TOTAL_INCREASING
     _attr_has_entity_name: bool = True
 
     def __init__(self, device: Device) -> None:
@@ -375,8 +356,8 @@ class EnergyTotalSensor(WfRacEntity, RestoreSensor):
 
     _attr_translation_key = "energy_usage_total"
     _attr_native_unit_of_measurement: str | None = UnitOfEnergy.KILO_WATT_HOUR
-    _attr_device_class: SensorDeviceClass | str | None = SensorDeviceClass.ENERGY
-    _attr_state_class: SensorStateClass | str | None = SensorStateClass.TOTAL_INCREASING
+    _attr_device_class: SensorDeviceClass | None = SensorDeviceClass.ENERGY
+    _attr_state_class: SensorStateClass | None = SensorStateClass.TOTAL_INCREASING
     _attr_has_entity_name: bool = True
     _attr_suggested_display_precision: int | None = 2
 
@@ -401,7 +382,13 @@ class EnergyTotalSensor(WfRacEntity, RestoreSensor):
 
         if (stored := await self.async_get_last_extra_data()) is not None:
             restored = EnergyTotalExtraStoredData.from_dict(stored.as_dict())
-            if restored is not None and restored.native_value is not None:
+            # native_value's declared type also allows date/datetime, which
+            # this sensor never stores but float() can't convert - restrict
+            # to what a restored total can actually be instead of crashing
+            # async_added_to_hass() on an unexpected stored type.
+            if restored is not None and isinstance(
+                restored.native_value, (int, float, str, Decimal)
+            ):
                 self._total = float(restored.native_value)
                 self._last_raw = restored.last_raw
                 self._attr_native_value = round(self._total, 2)
@@ -421,15 +408,10 @@ class EnergyTotalSensor(WfRacEntity, RestoreSensor):
         raw = self._device.airco.Electric
         if raw is None:
             return
-        if self._last_raw is not None:
-            if raw >= self._last_raw:
-                # Normal progression inside one run.
-                self._total += raw - self._last_raw
-            else:
-                # The unit reset its per-run counter. The first poll of the new
-                # run may already be non-zero; count that reading instead of
-                # dropping it while merely re-anchoring.
-                self._total += raw
+        # Only upward steps count; a drop means the unit was switched on and
+        # started a new run, and what came before is already in the total.
+        if self._last_raw is not None and raw > self._last_raw:
+            self._total += raw - self._last_raw
         self._last_raw = raw
         self._attr_native_value = round(self._total, 2)
 
@@ -444,27 +426,23 @@ class EnergyTotalSensor(WfRacEntity, RestoreSensor):
 
 
 class ServiceDataSensor(WfRacEntity, SensorEntity):
-    """Operation-data sensors (compressor frequency, current, hot gas temp,
-    EEV pulses/position, coil temperatures) - see rac_parser.SERVICE_DATA_CODES.
-    Only created while CONF_SERVICE_DATA is on, which is what makes Device
-    request these values in the first place - see
-    Device._maybe_request_service_data().
-
-    Enabled once they exist: switching the option on is already the opt-in, so
-    making the user enable each one on top would be a second hurdle for
-    nothing. The raw-byte ones are the exception, see _RAW_TYPES below.
-    Diagnostic because they describe how the machine is running rather than
-    what it is set to.
+    """Operation-data sensors, including converted values and raw bytes.
+    Active sensors register their segment code with Device, which requests
+    only those segments.
     """
 
     _attr_has_entity_name = True
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
 
     _FIELD_BY_TYPE = {
         ATTR_COMPRESSOR_FREQUENCY: "CompressorFrequency",
+        ATTR_COMPRESSOR_FREQUENCY_RAW: "CompressorFrequencyRaw",
         ATTR_OPERATING_CURRENT: "OperatingCurrent",
+        ATTR_OPERATING_CURRENT_RAW: "OperatingCurrentRaw",
         ATTR_HOT_GAS_TEMP: "HotGasTemp",
+        ATTR_HOT_GAS_TEMP_RAW: "HotGasTempRaw",
         ATTR_EEV_PULSES: "EevPulses",
         ATTR_EEV_POSITION: "EevPosition",
         ATTR_INDOOR_COIL_TEMP: "IndoorCoilTemp",
@@ -476,23 +454,12 @@ class ServiceDataSensor(WfRacEntity, SensorEntity):
         ATTR_PROTECTION_RAW: "ProtectionRaw",
     }
 
-    # Thermistor and status bytes with no established conversion. No unit and
-    # no device class on purpose: these are real measurements, but labelling a
-    # byte "degrees" would be a guess. Off by default, because a unitless raw
-    # value is only useful to someone decoding it - which is exactly what the
-    # people asking for them are doing.
-    _RAW_TYPES = (
-        ATTR_INDOOR_COIL_RAW,
-        ATTR_INDOOR_COIL_OUTLET_RAW,
-        ATTR_OUTDOOR_COIL_RAW,
-        ATTR_DISCHARGE_SUPERHEAT_RAW,
-        ATTR_PROTECTION_RAW,
-    )
-
     def __init__(self, device: Device, custom_type: str) -> None:
         """Initialize the sensor."""
-        super().__init__(device)
         self._custom_type = custom_type
+        super().__init__(
+            device, context=SERVICE_DATA_CODE_BY_FIELD[self._FIELD_BY_TYPE[custom_type]]
+        )
         self._attr_unique_id = f"{DOMAIN}-{self._device.airco_id}-{custom_type}-sensor"
         self._attr_translation_key = custom_type
         if custom_type == ATTR_COMPRESSOR_FREQUENCY:
@@ -511,17 +478,8 @@ class ServiceDataSensor(WfRacEntity, SensorEntity):
             self._attr_native_unit_of_measurement = PERCENTAGE
             self._attr_icon = "mdi:valve"
         elif custom_type in (ATTR_INDOOR_COIL_TEMP, ATTR_INDOOR_COIL_OUTLET_TEMP):
-            # Converted only inside the calibrated band, unknown above it - the
-            # matching raw sensor covers the rest, see RacParser._coil_temp().
             self._attr_device_class = SensorDeviceClass.TEMPERATURE
             self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-        elif custom_type in self._RAW_TYPES:
-            self._attr_entity_registry_enabled_default = False
-            self._attr_icon = (
-                "mdi:shield-alert-outline"
-                if custom_type == ATTR_PROTECTION_RAW
-                else "mdi:snowflake-thermometer"
-            )
         self._update_state()
 
     def _update_state(self) -> None:
