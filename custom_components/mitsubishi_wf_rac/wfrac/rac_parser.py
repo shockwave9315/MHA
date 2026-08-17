@@ -1,6 +1,5 @@
 """Fork compatibility shim over the upstream 2026.9.5 RAC parser."""
 
-from dataclasses import replace
 from typing import Any, cast
 
 from . import rac_parser_upstream as _upstream
@@ -22,9 +21,12 @@ class RacParser(_upstream.RacParser):
     def _variable_trailer(cls, aircon_stat: AirconStat) -> bytearray:
         request = cast(Any, aircon_stat.ServiceDataStatusRequest)
         if request is True:
-            aircon_stat = replace(
-                aircon_stat,
-                ServiceDataStatusRequest=tuple(_upstream.SERVICE_DATA_CODES),
+            # Pre-9.5 ``True`` meant "all known codes" in declaration order.
+            # The new tuple path sorts requested codes for deterministic
+            # demand-driven requests; keep the legacy flag's byte-for-byte
+            # order for compatibility with existing callers/tests.
+            return cls._build_trailer(
+                [(code, 255, 255, 255) for code in _upstream.SERVICE_DATA_CODES]
             )
         return super()._variable_trailer(aircon_stat)
 
