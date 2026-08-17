@@ -20,10 +20,15 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 PARALLEL_UPDATES = 1
 
-# Same bounds as the temp_rule_*/temp_setting_* fields in services.yaml's
-# set_home_leave_mode action.
-HOME_LEAVE_TEMP_MIN = 10.0
-HOME_LEAVE_TEMP_MAX = 50.0
+# The wire fields have different signed/range semantics. Keep their bounds
+# field-specific; using one 10..50 C range for all four silently prevents valid
+# heating thresholds/settings that the protocol and service action support.
+HOME_LEAVE_TEMP_BOUNDS = {
+    ("cooling", "TempRule"): (10.0, 50.0),
+    ("cooling", "TempSetting"): (10.0, 50.0),
+    ("heating", "TempRule"): (-20.0, 30.0),
+    ("heating", "TempSetting"): (0.0, 30.0),
+}
 HOME_LEAVE_TEMP_STEP = 0.5
 
 
@@ -61,18 +66,11 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
     overwriting real settings with defaults.
     """
 
-    # None (not DIAGNOSTIC) so these land in the device page's main Controls
-    # section, directly editable - the whole point of replacing the former
-    # diagnostic sensors. Disabled by default though, same as those sensors
-    # were: a niche away-mode feature, not everyone with a HomeLeaveMode-
-    # capable model wants six extra entities on their device page.
     _attr_entity_category = None
     _attr_entity_registry_enabled_default = False
     _attr_has_entity_name: bool = True
     _attr_device_class = NumberDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
-    _attr_native_min_value = HOME_LEAVE_TEMP_MIN
-    _attr_native_max_value = HOME_LEAVE_TEMP_MAX
     _attr_native_step = HOME_LEAVE_TEMP_STEP
     _attr_mode = NumberMode.BOX
 
@@ -82,6 +80,9 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
         super().__init__(device)
         self._mode = mode
         self._attribute = attribute
+        self._attr_native_min_value, self._attr_native_max_value = HOME_LEAVE_TEMP_BOUNDS[
+            (mode, attribute)
+        ]
         slug = "temp_rule" if attribute == "TempRule" else "temp_setting"
         self._attr_translation_key = f"home_leave_{mode}_{slug}"
         self._attr_unique_id = (
@@ -97,9 +98,6 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
         )
 
     def _update_state(self) -> None:
-        # WfRacEntity.available reflects device connectivity, not per-value
-        # readiness - a not-yet-requested Home Leave value just reads as
-        # "unknown" (native_value None), same as the sensor it replaced.
         setting = self._current_setting()
         self._attr_native_value = (
             getattr(setting, self._attribute) if setting is not None else None
@@ -117,10 +115,6 @@ class HomeLeaveModeNumber(WfRacEntity, NumberEntity):
                 translation_domain=DOMAIN,
                 translation_key="home_leave_mode_status_unknown",
             )
-        # Named kwargs rather than replace(setting, **{self._attribute: value}):
-        # HomeLeaveModeSetting also has an AirFlow: int field, so a dynamic
-        # **{str: float} unpacking can't statically prove it only ever
-        # touches the two float fields this class is instantiated for.
         if self._attribute == "TempRule":
             if self._mode == "cooling":
                 cooling = replace(cooling, TempRule=value)
