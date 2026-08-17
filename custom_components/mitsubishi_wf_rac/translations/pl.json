@@ -9,7 +9,8 @@
     },
     "abort": {
       "existing_instance_updated": "Zaktualizowano istniejącą konfigurację.",
-      "already_configured": "Klimatyzator jest już skonfigurowany"
+      "already_configured": "Klimatyzator jest już skonfigurowany",
+      "reconfigure_successful": "Ponowna konfiguracja zakończyła się powodzeniem"
     },
     "step": {
       "user": {
@@ -17,8 +18,7 @@
           "name": "Nazwa klimatyzatora",
           "host": "Adres hosta (IP)",
           "port": "Port",
-          "force_update": "Ignoruj zduplikowany adres IP (może powodować błędy — sprawdź log)",
-          "create_swing_mode_select": "Utwórz dodatkowe selektory kierunku żaluzji"
+          "force_update": "Ignoruj zduplikowany adres IP (może powodować błędy — sprawdź log)"
         },
         "description": "Wprowadź poprawne dane lokalnego połączenia z modułem WF-RAC, aby dodać klimatyzator ręcznie.",
         "title": "Dane połączenia WF-RAC"
@@ -29,7 +29,45 @@
         "data": {
           "name": "Nazwa klimatyzatora"
         }
+      },
+      "reconfigure": {
+        "data": {
+          "name": "Nazwa klimatyzatora",
+          "host": "Adres hosta (IP)",
+          "port": "Port"
+        },
+        "description": "Zmień dane połączenia z tym klimatyzatorem. Nowy adres zostanie sprawdzony przed zapisaniem.",
+        "title": "Ponowna konfiguracja połączenia WF-RAC"
       }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "Nie udało się połączyć z klimatyzatorem pod adresem {device}."
+    },
+    "temperature_required": {
+      "message": "Wymagana jest temperatura zadana."
+    },
+    "temperature_below_minimum": {
+      "message": "{temperature} °C jest poniżej minimalnej temperatury {min_temp} °C dla tego trybu."
+    },
+    "temperature_above_maximum": {
+      "message": "{temperature} °C jest powyżej maksymalnej temperatury {max_temp} °C dla tego trybu."
+    },
+    "home_leave_mode_not_supported": {
+      "message": "Ten model nie zgłasza obsługi trybu nieobecności."
+    },
+    "home_leave_mode_status_unknown": {
+      "message": "Wartości trybu nieobecności nie są jeszcze znane. Najpierw wywołaj raz akcję „Pobierz stan trybu nieobecności” encji klimatyzacji — urządzenie nie przesyła tych danych podczas zwykłego odpytywania."
+    },
+    "entity_not_energy_total_sensor": {
+      "message": "{entity_id} nie jest sensorem łącznego zużycia energii."
+    }
+  },
+  "issues": {
+    "too_many_devices": {
+      "title": "Zbyt wiele urządzeń zarejestrowanych w {device_name}",
+      "description": "Home Assistant nie może zarejestrować się w tym klimatyzatorze, ponieważ tabela kont modułu jest pełna. Otwórz aplikację Smart M-Air i usuń inne zarejestrowane urządzenie albo przywróć moduł do ustawień fabrycznych, a następnie przeładuj integrację."
     }
   },
   "options": {
@@ -37,18 +75,19 @@
       "init": {
         "description": "Poniżej możesz zmienić ustawienia tego klimatyzatora.",
         "data": {
-          "host": "Adres hosta (IP)",
           "availability_retry_limit": "Limit nieudanych odpytań przed oznaczeniem jako niedostępny (minimum 3)",
           "firmware_update_check": "Sprawdzanie aktualizacji firmware (online)",
-          "service_data": "Dane serwisowe",
-          "create_swing_mode_select": "Utwórz dodatkowe selektory kierunku żaluzji",
           "indoor_offset": "Korekta czujnika temperatury wewnętrznej",
           "outdoor_offset": "Korekta czujnika temperatury zewnętrznej",
           "target_offset": "Korekta temperatury zadanej",
           "target_offset_cool": "Korekta temperatury zadanej (chłodzenie)",
           "target_offset_heat": "Korekta temperatury zadanej (grzanie)"
         },
-        "title": "Ustawienia WF-RAC"
+        "title": "Ustawienia WF-RAC",
+        "data_description": {
+          "target_offset_cool": "Pozostaw puste, aby używać ogólnej korekty temperatury zadanej.",
+          "target_offset_heat": "Pozostaw puste, aby używać ogólnej korekty temperatury zadanej."
+        }
       }
     }
   },
@@ -225,11 +264,20 @@
       "compressor_frequency": {
         "name": "Częstotliwość sprężarki"
       },
+      "compressor_frequency_raw": {
+        "name": "Częstotliwość sprężarki (wartość surowa)"
+      },
       "operating_current": {
         "name": "Prąd pracy"
       },
+      "operating_current_raw": {
+        "name": "Prąd pracy (wartość surowa)"
+      },
       "hot_gas_temp": {
         "name": "Temperatura gazu tłocznego"
+      },
+      "hot_gas_temp_raw": {
+        "name": "Temperatura gazu tłocznego (wartość surowa)"
       },
       "eev_pulses": {
         "name": "Impulsy EEV"
@@ -244,13 +292,13 @@
         "name": "Temperatura wylotu wymiennika wewnętrznego"
       },
       "indoor_coil_raw": {
-        "name": "Czujnik wymiennika wewnętrznego (wartość surowa)"
+        "name": "Temperatura wymiennika wewnętrznego (wartość surowa)"
       },
       "indoor_coil_outlet_raw": {
-        "name": "Czujnik wylotu wymiennika wewnętrznego (wartość surowa)"
+        "name": "Temperatura wylotu wymiennika wewnętrznego (wartość surowa)"
       },
       "outdoor_coil_raw": {
-        "name": "Czujnik wymiennika zewnętrznego (wartość surowa)"
+        "name": "Temperatura wymiennika zewnętrznego (wartość surowa)"
       },
       "discharge_superheat_raw": {
         "name": "Przegrzanie tłoczenia (wartość surowa)"
