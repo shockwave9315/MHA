@@ -5,8 +5,19 @@ energy-total reset accounting is layered here, so future upstream syncs stay
 small and reviewable.
 """
 
+from typing import Any
+
 from . import sensor_upstream as _upstream
-from .sensor_upstream import *  # noqa: F403
+
+# Public classes/helpers used by tests and integrations are explicit. The
+# module-level __getattr__ below forwards anything else unchanged.
+DiagnosticsSensor = _upstream.DiagnosticsSensor
+TemperatureSensor = _upstream.TemperatureSensor
+EnergySensor = _upstream.EnergySensor
+EnergyTotalExtraStoredData = _upstream.EnergyTotalExtraStoredData
+ServiceDataSensor = _upstream.ServiceDataSensor
+_async_set_energy_total = _upstream._async_set_energy_total
+_async_remove_home_leave_mode_sensors = _upstream._async_remove_home_leave_mode_sensors
 
 
 class EnergyTotalSensor(_upstream.EnergyTotalSensor):
@@ -29,7 +40,13 @@ class EnergyTotalSensor(_upstream.EnergyTotalSensor):
         self._attr_native_value = round(self._total, 2)
 
 
-# async_setup_entry() is defined in the upstream module, so make its global
-# EnergyTotalSensor reference point at the fork subclass before exposing it.
-_upstream.EnergyTotalSensor = EnergyTotalSensor
+# async_setup_entry() lives in the upstream module and resolves
+# EnergyTotalSensor from its own module globals at call time. Patch that one
+# name through setattr so its entity construction uses the fork subclass.
+setattr(_upstream, "EnergyTotalSensor", EnergyTotalSensor)
 async_setup_entry = _upstream.async_setup_entry
+
+
+def __getattr__(name: str) -> Any:
+    """Forward upstream sensor helpers not overridden by the fork."""
+    return getattr(_upstream, name)
