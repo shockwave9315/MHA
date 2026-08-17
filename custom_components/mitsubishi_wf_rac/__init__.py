@@ -25,7 +25,8 @@ from .const import (
     CONF_OPERATOR_ID, CONF_CREATE_SWING_MODE_SELECT,
     DOMAIN,
 )
-from .wfrac.device import AVAILABILITY_FAILURE_LIMIT_MIN, Device, registration_full_issue_id
+from .wfrac.device import AVAILABILITY_FAILURE_LIMIT_MIN, registration_full_issue_id
+from .wfrac.fork_device import ForkDevice as Device
 
 _LOGGER = logging.getLogger(__name__)
 
