@@ -10,7 +10,14 @@ from . import MitsubishiWfRacConfigEntry
 
 # These values let a third party identify or control a unit, so diagnostic
 # downloads must remain safe to attach to public issue reports.
-TO_REDACT = {"operator_id", "operatorId", "device_id", "airco_id", "host"}
+TO_REDACT = {
+    "operator_id",
+    "operatorId",
+    "device_id",
+    "airco_id",
+    "host",
+    "updated_by",
+}
 
 
 async def async_get_config_entry_diagnostics(
