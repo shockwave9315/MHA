@@ -8,32 +8,33 @@ Fork integracji **Mitsubishi Heavy Industries WF-RAC** dla Home Assistant, rozwi
 
 ## Stan projektu
 
-Bazą runtime pozostaje **2026.9.4-beta1**, uzupełniona selektywnie o istotne poprawki z późniejszego upstreamu 2026.9.4 oraz własne poprawki tego forka.
-
-Zmiany z upstreamu nie są synchronizowane automatycznie. Najpierw są porównywane z kodem forka, a następnie przechodzą testy i review.
+Aktualny runtime zawiera selektywnie podciągniętą architekturę upstream **2026.9.5-beta2** oraz poprawki specyficzne dla tego forka. Zmiany z upstreamu nie są synchronizowane automatycznie — najpierw są porównywane z naszym kodem, a następnie przechodzą testy i review.
 
 Testowany lokalnie m.in. na module:
 
 `WF-RAC / MCU 131 / wireless 010`
 
-Integracja komunikuje się z modułem lokalnie przez HTTP/HTTPS. Opcjonalne sprawdzanie dostępności nowego firmware wymaga połączenia z Internetem.
+Integracja komunikuje się z modułem lokalnie przez HTTP/HTTPS. Opcjonalne sprawdzanie dostępności nowego firmware jest jedyną funkcją wymagającą połączenia z Internetem.
 
-## Najważniejsze zmiany w tym forku
+## Najważniejsze zachowanie
 
 | Obszar | Zachowanie |
 |---|---|
 | Krótkie zaniki komunikacji | pojedyncze błędy nie powodują natychmiastowego `unavailable` |
 | Availability | urządzenie jest oznaczane jako niedostępne dopiero po kilku kolejnych nieudanych odpytywaniach; minimum 3 |
-| HTTP / HTTPS | integracja zachowuje działający transport i potrafi ponownie wykryć właściwy sposób połączenia |
+| HTTP / HTTPS | integracja zachowuje działający transport i potrafi odzyskać właściwy protokół także w tym samym wywołaniu |
 | Kolejka komend | zmiany wykonane blisko siebie są scalane, żeby nie nadpisywały się wzajemnie |
-| Odczyty statusowe | Service Data i Home Leave korzystają z ramek tylko do odczytu |
-| Home Leave | odczyt statusu nie może już zgubić oczekującej komendy sterującej |
-| Service Data | retry po odrzuconym zapytaniu oraz świeżość liczona osobno dla każdego pola |
+| Odczyty statusowe | operation data i Home Leave używają ramek bez bitów SET |
+| Home Leave | STATUS nie może połknąć ani wyprzedzić oczekującej komendy SET; signed temperatures są zachowane |
+| Operation data | requesty są demand-driven — pobierane są tylko kody potrzebne przez aktywne encje |
+| Freshness operation data | świeżość liczona osobno dla każdego pola, więc jeden żywy sensor nie podtrzymuje innego zamrożonego odczytu |
 | Temperatury wymiennika | THI-R1 / THI-R3 korzystają z przeliczenia NTC i działają również podczas grzania |
 | Target temperature offset | spójne offsety zależne od trybu |
 | Energy Usage Total | poprawione liczenie po resecie licznika bieżącego cyklu |
-| Język polski | pełne tłumaczenie konfiguracji, opcji i encji |
-| CI | HACS + Hassfest + Pytest |
+| Diagnostyka HA | bezpieczny, zredagowany eksport danych diagnostycznych |
+| Repairs | pełna tabela kont WF-RAC jest zgłaszana jako problem w Home Assistant Repairs |
+| Język polski | tłumaczenie konfiguracji, reconfigure, błędów, Repairs, opcji i encji |
+| CI | HACS + Hassfest + Pytest + mypy `--strict` |
 
 ## Instalacja przez HACS
 
@@ -45,42 +46,49 @@ Typ: **Integration**.
 
 Następnie zainstaluj oznaczony tag/release tego forka i uruchom ponownie Home Assistant.
 
-Jeśli Home Assistant działa po polsku, konfiguracja, opcje i nazwy encji będą wyświetlane po polsku.
+## Konfiguracja i opcje
 
-## Opcje integracji
+Zmiana **nazwy, hosta/IP lub portu** odbywa się przez **Reconfigure**. Nowe dane połączenia są sprawdzane z urządzeniem przed zapisaniem, więc błędny adres nie zostanie zapisany jako zwykła opcja.
+
+W zwykłym **Configure / Options** pozostają:
 
 | Opcja | Znaczenie |
 |---|---|
-| Host (IP) | lokalny adres IP modułu WF-RAC |
 | Availability retry limit | liczba kolejnych nieudanych odpytań przed oznaczeniem urządzenia jako niedostępne; minimum 3 |
 | Firmware Update Check (Online) | opcjonalne sprawdzanie dostępności nowszego firmware |
-| Service Data | dodatkowe lokalne dane diagnostyczne |
-| Create swing mode selectors | ustawienie dostępne tylko podczas pierwszego dodawania urządzenia; tworzy osobne selektory poziomego i pionowego kierunku nawiewu. Późniejsza zmiana wymaga usunięcia i ponownego dodania urządzenia |
 | Indoor Temp. Sensor Offset | korekta temperatury wewnętrznej |
 | Outdoor Temp. Sensor Offset | korekta temperatury zewnętrznej |
 | Target Temp. Offset | ogólna korekta temperatury zadanej |
-| Target Temp. Offset (Cooling) | osobna korekta temperatury zadanej dla chłodzenia |
-| Target Temp. Offset (Heating) | osobna korekta temperatury zadanej dla grzania |
+| Target Temp. Offset (Cooling) | osobna korekta temperatury zadanej dla chłodzenia; puste = użyj wartości ogólnej |
+| Target Temp. Offset (Heating) | osobna korekta temperatury zadanej dla grzania; puste = użyj wartości ogólnej |
 
-## Service Data
+Selektory poziomego/pionowego kierunku nawiewu i prędkości wentylatora są zawsze rejestrowane jako encje. Dla starszych wpisów konfiguracji wcześniejszy wybór tylko decyduje, czy są domyślnie włączone — można je później włączać i wyłączać normalnie z rejestru encji bez usuwania integracji.
 
-Service Data jest opcjonalne i działa lokalnie. Odczyt danych diagnostycznych nie powinien zmieniać power, trybu pracy, nawiewu, temperatury zadanej ani położenia żaluzji.
+## Operation data / dane serwisowe
+
+Nie ma już globalnego przełącznika **Service Data**. Encje operation-data są rejestrowane jako diagnostyczne i domyślnie wyłączone. **Włączenie konkretnej encji powoduje pobieranie tylko kodu/kodów potrzebnych tej encji.** Jeżeli żadna z tych encji nie jest aktywna, integracja nie wykonuje dodatkowego requestu operation-data.
 
 | Kod | Dane | Status |
 |---|---|---|
-| `0x11` | Compressor Frequency | potwierdzone |
-| `0x90` | Operating Current | potwierdzone |
-| `0x85` | Discharge / Hot Gas Temperature | potwierdzone |
-| `0x13` | EEV pulses | potwierdzone |
+| `0x11` | Compressor Frequency | potwierdzone + raw |
+| `0x90` | Operating Current | potwierdzone + raw |
+| `0x85` | Discharge / Hot Gas Temperature | potwierdzone + raw |
+| `0x13` | EEV pulses / relative position | potwierdzone |
 | `0x81` | THI-R1 indoor coil | raw + konwersja NTC |
 | `0x87` | THI-R3 indoor coil outlet | raw + konwersja NTC |
-| `0x82` | THO-R1 outdoor coil | raw, skala nieznana |
-| `0xB1` | TDSH | raw, skala do potwierdzenia |
-| `0x7C` | Protection number | raw / zależne od jednostki |
+| `0x82` | THO-R1 outdoor coil | raw, skala nieustalona |
+| `0xB1` | TDSH | raw, znaczenie/skala do potwierdzenia |
+| `0x7C` | Protection number | raw; wygląda na protective stop, nie zwykły overload clamp |
 
 `EEV Position %` jest normalizacją wartości `0..255` do `0..100%`. Nie jest skalibrowanym procentem mechanicznego otwarcia zaworu. Źródłem pozostaje `EEV Pulses`.
 
-Freshness danych serwisowych jest liczony osobno dla każdego pola. Jeśli jedno pole nadal przychodzi, a inne przestanie być raportowane, brakujący sensor po określonym czasie przejdzie w `unknown` zamiast pokazywać starą wartość jako aktualną.
+Raw sensory pozostają domyślnie wyłączone i są przeznaczone głównie do reverse engineeringu. Freshness jest liczony per pole: jeżeli np. częstotliwość sprężarki nadal przychodzi, a prąd przestanie być raportowany, sensor prądu po czasie przejdzie w `unknown` zamiast wisieć ze starą wartością.
+
+## Diagnostyka i Repairs
+
+Home Assistant może pobrać diagnostykę integracji zawierającą m.in. stan urządzenia, sposób połączenia, firmware, capabilities i bieżący stan `Aircon`. Dane pozwalające zidentyfikować lub kontrolować jednostkę — host/IP, `operator_id`, `device_id` i `airco_id` — są redagowane przed eksportem.
+
+Jeżeli WF-RAC ma pełną wewnętrzną tabelę zarejestrowanych kont i ponowna rejestracja Home Assistanta nie może się udać, integracja tworzy problem w **Ustawienia → System → Naprawy**. Problem znika po udanej rejestracji.
 
 ## Ważne
 

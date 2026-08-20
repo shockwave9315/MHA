@@ -9,6 +9,8 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from . import MitsubishiWfRacConfigEntry
 from .entity import WfRacEntity
@@ -17,9 +19,14 @@ from .wfrac.error_codes import describe_error_code
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
+PARALLEL_UPDATES = 1
 
 
-async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: MitsubishiWfRacConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Setup binary sensor entries"""
 
     device: Device = entry.runtime_data.device
@@ -29,8 +36,8 @@ async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_e
         CompressorBinarySensor(device),
     ]
     # Occupancy ("vacant") detection is only reported by units whose capability
-    # table (#187) has VacantProperty=true - includes ZT-2025 (raw=3), which
-    # the wire-protocol ModelNr grouping alone would miss (see capabilities.py).
+    # table has VacantProperty=true - includes ZT-2025 (raw=3), which the
+    # wire-protocol ModelNr grouping alone would miss (see capabilities.py).
     if device.airco.Capabilities.vacant_property:
         entities.append(OccupancyBinarySensor(device))
 
@@ -56,7 +63,7 @@ class ProblemBinarySensor(WfRacEntity, BinarySensorEntity):
         self._attr_is_on = code != "00"
         attrs: dict[str, str] = {"error_code": code}
         # Deliberately no key at all (rather than a guessed/empty value) for
-        # codes outside fehlercodes-selfdiagnose.md's tables.
+        # codes describe_error_code() doesn't recognize.
         # NB this still reports is_on for an M<n> code, which is a protective
         # stop the unit recovered from rather than a fault it is displaying -
         # arguably not a "problem". Left as it was for now; changing it would

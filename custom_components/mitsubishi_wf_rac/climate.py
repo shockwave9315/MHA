@@ -8,15 +8,21 @@ from . import MitsubishiWfRacConfigEntry
 import voluptuous as vol
 
 from homeassistant.components.climate import ClimateEntity
-from homeassistant.components.climate.const import HVACMode, HVACAction, FAN_AUTO
+from homeassistant.components.climate.const import (
+    ClimateEntityFeature,
+    HVACMode,
+    HVACAction,
+    FAN_AUTO,
+)
 from homeassistant.const import UnitOfTemperature, ATTR_TEMPERATURE
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv, entity_platform
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .entity import WfRacEntity
-from .target_offset import resolve_target_offset
 from .wfrac.device import Device
-from .wfrac.models.aircon import AirconCommands, HomeLeaveModeSetting
+from .wfrac.models.aircon import Aircon, AirconCommands, HomeLeaveModeSetting
 from .const import (
     DOMAIN,
     FAN_MODE_TRANSLATION,
@@ -39,9 +45,14 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+PARALLEL_UPDATES = 1
 
 
-async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_entities):
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: MitsubishiWfRacConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Setup climate entities"""
     device: Device = entry.runtime_data.device
     _LOGGER.info("Setup climate for: %s, %s", device.device_name, device.airco_id)
@@ -65,9 +76,9 @@ async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_e
         "async_set_swing_mode",
     )
 
-    # HomeLeaveMode (Tag 248, #187 capability index 7) - deliberately services,
-    # not switch/number entities, until confirmed on real hardware (see
-    # todo.md): no dashboard tile to accidentally trigger before that.
+    # HomeLeaveMode (Tag 248, capability index 7) - deliberately services, not
+    # switch/number entities, until confirmed on real hardware: no dashboard
+    # tile to accidentally trigger before that.
     platform.async_register_entity_service(
         SERVICE_REQUEST_HOME_LEAVE_MODE_STATUS,
         {},
@@ -94,7 +105,7 @@ async def async_setup_entry(hass, entry: MitsubishiWfRacConfigEntry, async_add_e
 class AircoClimate(WfRacEntity, ClimateEntity):
     """Representation of a climate entity"""
 
-    _attr_supported_features: int = SUPPORT_FLAGS
+    _attr_supported_features: ClimateEntityFeature = SUPPORT_FLAGS
     _attr_temperature_unit: str = UnitOfTemperature.CELSIUS
     _attr_hvac_modes: list[HVACMode] = SUPPORTED_HVAC_MODES
     _attr_fan_modes: list[str] = SUPPORTED_FAN_MODES
@@ -115,19 +126,19 @@ class AircoClimate(WfRacEntity, ClimateEntity):
         self._update_state()
 
     def _min_temp_for_mode(self, hvac_mode: HVACMode) -> float:
-        """Minimum setpoint depends on hvac_mode - see #113.
+        """Minimum setpoint depends on hvac_mode.
 
         Per Mitsubishi Heavy Industries' official operable table ('21
         SRK-T-324, models SRK60ZSX-W/A and SRK100ZR-W): indoor unit only
         accepts 18-30C. Cooling reliably goes lower than that in practice
-        (see #113) regardless of model, so that override applies unconditionally.
+        regardless of model, so that override applies unconditionally.
         Models with the app's PresetTempRange2 capability (`ModelNoType`/
         `TempItemType` in the app, see wfrac/capabilities.py) go further,
         per the app's own table (Constants.java TempItemType.getMin/getMax):
         Auto/Cool/Dry down to 16, Heat down to 10. That 10C heating floor is
-        unconfirmed on real hardware (see #187) - the plain-setpoint reset to
-        18C after a power cycle that's documented for the default range was
-        only ever observed on hardware without this capability.
+        unconfirmed on real hardware - the plain-setpoint reset to 18C after a
+        power cycle that's documented for the default range was only ever
+        observed on hardware without this capability.
         """
         if self._device.airco.Capabilities.preset_temp_range_2:
             if hvac_mode == HVACMode.HEAT:
@@ -154,24 +165,15 @@ class AircoClimate(WfRacEntity, ClimateEntity):
     def max_temp(self) -> float:
         return self._max_temp_for_mode(self._attr_hvac_mode)
 
-    def _resolve_target_offset(self, hvac_mode: HVACMode) -> float:
-        """Resolve the effective target_offset for a given hvac_mode.
-
-        COOL/DRY fall back to CONF_TARGET_OFFSET_COOL, HEAT to
-        CONF_TARGET_OFFSET_HEAT, everything else always uses the global
-        CONF_TARGET_OFFSET - and so does COOL/HEAT when its per-mode option
-        is unset (None), which is what keeps single-target_offset installs
-        unchanged. Called from both the write and read-back path so they can
-        never resolve a different offset for the same mode (see beta2: that
-        divergence is what caused the target_temperature re-send loop).
-        """
-        return resolve_target_offset(self._device.config_entry.options, hvac_mode)
-
-    async def async_set_temperature(self, **kwargs) -> None:
+    async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
         set_temp = kwargs.get(ATTR_TEMPERATURE)
         if set_temp is None:
-            raise ValueError("Temperature is required")
+            raise ServiceValidationError(
+                "Temperature is required",
+                translation_domain=DOMAIN,
+                translation_key="temperature_required",
+            )
 
         # If this call also switches hvac_mode, the minimum must reflect the mode
         # being switched to, not the (still stale until the next poll) current one.
@@ -181,10 +183,26 @@ class AircoClimate(WfRacEntity, ClimateEntity):
         max_temp = self._max_temp_for_mode(target_hvac_mode)
 
         if set_temp < min_temp:
-            raise ValueError(f"Temperature {set_temp} is below minimum {min_temp}")
+            raise ServiceValidationError(
+                f"Temperature {set_temp} is below minimum {min_temp}",
+                translation_domain=DOMAIN,
+                translation_key="temperature_below_minimum",
+                translation_placeholders={
+                    "temperature": str(set_temp),
+                    "min_temp": str(min_temp),
+                },
+            )
 
         if set_temp > max_temp:
-            raise ValueError(f"Temperature {set_temp} is above maximum {max_temp}")
+            raise ServiceValidationError(
+                f"Temperature {set_temp} is above maximum {max_temp}",
+                translation_domain=DOMAIN,
+                translation_key="temperature_above_maximum",
+                translation_placeholders={
+                    "temperature": str(set_temp),
+                    "max_temp": str(max_temp),
+                },
+            )
 
         # The AC unit's own thermostat logic uses its own indoor sensor reading,
         # subject to the same calibration bias CONF_INDOOR_OFFSET corrects for
@@ -198,7 +216,7 @@ class AircoClimate(WfRacEntity, ClimateEntity):
         target_temp = set_temp - target_offset
         target_temp = max(min_temp, min(max_temp, target_temp))
 
-        opts: dict[str, Any] = {AirconCommands.PresetTemp: target_temp}
+        opts: dict[AirconCommands, Any] = {AirconCommands.PresetTemp: target_temp}
 
         if "hvac_mode" in kwargs:
             opts.update(
@@ -272,12 +290,14 @@ class AircoClimate(WfRacEntity, ClimateEntity):
     def _require_home_leave_mode_capability(self) -> None:
         if not self._device.airco.Capabilities.home_leave_mode:
             raise ServiceValidationError(
-                "This model does not report the HomeLeaveMode capability (#187)"
+                "This model does not report the HomeLeaveMode capability",
+                translation_domain=DOMAIN,
+                translation_key="home_leave_mode_not_supported",
             )
 
     async def async_request_home_leave_mode_status(self) -> None:
         """See Device.async_request_home_leave_mode_status - verified live
-        (05.08.2026) against the official app's own display, see todo.md."""
+        against the official app's own display."""
         self._require_home_leave_mode_capability()
         await self._device.async_request_home_leave_mode_status()
 
@@ -290,8 +310,7 @@ class AircoClimate(WfRacEntity, ClimateEntity):
         temp_setting_heating: float,
         air_flow_heating: int,
     ) -> None:
-        """See Device.async_set_home_leave_mode - verified live
-        (05.08.2026), see todo.md."""
+        """See Device.async_set_home_leave_mode - verified live."""
         self._require_home_leave_mode_capability()
         await self._device.async_set_home_leave_mode(
             HomeLeaveModeSetting(
@@ -311,13 +330,11 @@ class AircoClimate(WfRacEntity, ClimateEntity):
         airco = self._device.airco
 
         # Apply indoor offset
-        indoor_offset = self._device.config_entry.options.get(CONF_INDOOR_OFFSET, 0.0)
-        # airco.OperationMode reports the underlying cool/heat mode even
-        # while the unit is off (self._attr_hvac_mode gets forced to OFF
-        # below in that case) - both the displayed hvac_mode and the
-        # target_offset resolution need that underlying mode, so it's
-        # computed once here and shared between them.
-        mode_from_operation = list(HVAC_TRANSLATION.keys())[airco.OperationMode]
+        indoor_offset = self._device.options.get(CONF_INDOOR_OFFSET, 0.0)
+        # Both the displayed hvac_mode and the target_offset resolution need
+        # the underlying cool/heat mode, so it's computed once here and shared
+        # between them.
+        mode_from_operation = self._hvac_mode_from_operation
         # Mirror the subtraction in async_set_temperature() so the displayed
         # target_temperature agrees with what the user set - PresetTemp itself
         # holds the offset-lowered value that was actually sent to the device.
@@ -361,7 +378,7 @@ class AircoClimate(WfRacEntity, ClimateEntity):
             # Determine hvac_action based on operation mode and state
             self._attr_hvac_action = self._determine_hvac_action(airco)
 
-    def _determine_hvac_action(self, airco) -> HVACAction:
+    def _determine_hvac_action(self, airco: Aircon) -> HVACAction:
         """Determine the current HVAC action from operation mode and state.
 
         CoolHotJudge (content[8] & 8) reflects what the unit's own AUTO logic

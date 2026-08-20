@@ -2,6 +2,8 @@
 options flow. Repository (the HTTP layer) is patched out - no real network.
 """
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -12,6 +14,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components import mitsubishi_wf_rac
 from custom_components.mitsubishi_wf_rac.const import (
     CONF_AIRCO_ID,
     CONF_AVAILABILITY_RETRY_LIMIT,
@@ -253,6 +256,117 @@ async def test_user_flow_reuses_operator_and_device_id_from_existing_entry(hass:
     assert result["data"][CONF_DEVICE_ID] == "shared-device-id"
 
 
+# --- reconfigure flow ---------------------------------------------------
+
+
+def _existing_entry(
+    hass: HomeAssistant, name="Living Room AC", host="192.168.1.50", port=51443
+):
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            "name": name,
+            "port": port,
+            CONF_AIRCO_ID: "airco-1",
+            CONF_OPERATOR_ID: "operator-1",
+            CONF_DEVICE_ID: "device-1",
+        },
+        options={"host": host, CONF_FIRMWARE_UPDATE_CHECK: False},
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def test_reconfigure_flow_shows_form_with_current_values(hass: HomeAssistant):
+    entry = _existing_entry(hass, name="Living Room AC", host="192.168.1.50", port=51443)
+
+    result = await entry.start_reconfigure_flow(hass)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+    suggested = {
+        key.schema: key.description["suggested_value"] for key in result["data_schema"].schema
+    }
+    assert suggested == {"name": "Living Room AC", "host": "192.168.1.50", "port": 51443}
+
+
+async def test_reconfigure_flow_updates_host_and_reloads(hass: HomeAssistant):
+    entry = _existing_entry(hass, host="192.168.1.50")
+
+    repo = _mock_repository(airco_id="airco-1")
+    with _patch_repository(repo):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"name": "Living Room AC", "host": "192.168.1.60", "port": 51443},
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert entry.options["host"] == "192.168.1.60"
+    # Everything not touched by the form survives the update.
+    assert entry.data[CONF_OPERATOR_ID] == "operator-1"
+    assert entry.data[CONF_DEVICE_ID] == "device-1"
+    assert entry.options[CONF_FIRMWARE_UPDATE_CHECK] is False
+
+
+async def test_reconfigure_flow_allows_resubmitting_the_same_host(hass: HomeAssistant):
+    # The entry being reconfigured already "owns" this host among its own
+    # options - the duplicate-host check must exclude it, not just every
+    # *other* entry, or every reconfigure with an unchanged host would fail.
+    entry = _existing_entry(hass, host="192.168.1.50")
+
+    repo = _mock_repository(airco_id="airco-1")
+    with _patch_repository(repo):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"name": "Living Room AC", "host": "192.168.1.50", "port": 51443},
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+
+
+async def test_reconfigure_flow_rejects_another_entrys_host(hass: HomeAssistant):
+    MockConfigEntry(
+        domain=DOMAIN,
+        data={"name": "Bedroom AC"},
+        options={"host": "192.168.1.99"},
+    ).add_to_hass(hass)
+    entry = _existing_entry(hass, host="192.168.1.50")
+
+    repo = _mock_repository()
+    with _patch_repository(repo):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"name": "Living Room AC", "host": "192.168.1.99", "port": 51443},
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"host": "host_already_configured"}
+    assert entry.options["host"] == "192.168.1.50"
+
+
+async def test_reconfigure_flow_cannot_connect_shows_error(hass: HomeAssistant):
+    entry = _existing_entry(hass, host="192.168.1.50")
+
+    repo = _mock_repository()
+    repo.get_airco_id.side_effect = AirconApiError("timeout")
+    with _patch_repository(repo):
+        result = await entry.start_reconfigure_flow(hass)
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {"name": "Living Room AC", "host": "192.168.1.60", "port": 51443},
+        )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
+    assert entry.options["host"] == "192.168.1.50"
+
+
 # --- zeroconf discovery -------------------------------------------------
 
 
@@ -338,7 +452,6 @@ async def test_options_flow_saves_submitted_values(hass: HomeAssistant):
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            "host": "192.168.1.50",
             CONF_INDOOR_OFFSET: 1.0,
             CONF_OUTDOOR_OFFSET: -1.0,
             CONF_TARGET_OFFSET: 0.5,
@@ -347,6 +460,9 @@ async def test_options_flow_saves_submitted_values(hass: HomeAssistant):
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_TARGET_OFFSET] == 0.5
+    # host isn't a form field anymore (moved to the reconfigure flow), but
+    # the entry's existing value must survive an options save regardless.
+    assert result["data"]["host"] == "192.168.1.50"
 
 
 @pytest.mark.parametrize(
@@ -377,7 +493,7 @@ async def test_options_flow_enforces_offset_range(hass: HomeAssistant, key, valu
     schema = result["data_schema"]
 
     with pytest.raises(vol.MultipleInvalid):
-        schema({"host": "192.168.1.50", key: value})
+        schema({key: value})
 
 
 async def test_options_flow_rejects_a_retry_limit_below_the_floor(hass: HomeAssistant):
@@ -396,9 +512,9 @@ async def test_options_flow_rejects_a_retry_limit_below_the_floor(hass: HomeAssi
     schema = result["data_schema"]
 
     with pytest.raises(vol.MultipleInvalid):
-        schema({"host": "192.168.1.50", CONF_AVAILABILITY_RETRY_LIMIT: 1})
+        schema({CONF_AVAILABILITY_RETRY_LIMIT: 1})
 
-    assert schema({"host": "192.168.1.50", CONF_AVAILABILITY_RETRY_LIMIT: 5})[
+    assert schema({CONF_AVAILABILITY_RETRY_LIMIT: 5})[
         CONF_AVAILABILITY_RETRY_LIMIT
     ] == 5
 
@@ -419,7 +535,7 @@ async def test_options_flow_defaults_firmware_update_check_to_off(hass: HomeAssi
     result = await hass.config_entries.options.async_init(entry.entry_id)
     schema = result["data_schema"]
 
-    validated = schema({"host": "192.168.1.50"})
+    validated = schema({})
     assert validated[CONF_FIRMWARE_UPDATE_CHECK] is False
 
 
@@ -435,7 +551,6 @@ async def test_options_flow_saves_submitted_firmware_update_check(hass: HomeAssi
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            "host": "192.168.1.50",
             CONF_FIRMWARE_UPDATE_CHECK: True,
         },
     )
@@ -456,7 +571,6 @@ async def test_options_flow_saves_submitted_per_mode_offsets(hass: HomeAssistant
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            "host": "192.168.1.50",
             CONF_TARGET_OFFSET: 0.5,
             CONF_TARGET_OFFSET_COOL: 1.5,
             CONF_TARGET_OFFSET_HEAT: -1.5,
@@ -485,7 +599,6 @@ async def test_options_flow_leaves_per_mode_offsets_unset_when_omitted(hass: Hom
     result = await hass.config_entries.options.async_configure(
         result["flow_id"],
         {
-            "host": "192.168.1.50",
             CONF_TARGET_OFFSET: 0.5,
         },
     )
@@ -495,6 +608,27 @@ async def test_options_flow_leaves_per_mode_offsets_unset_when_omitted(hass: Hom
     assert CONF_TARGET_OFFSET_HEAT not in result["data"]
     assert result["data"].get(CONF_TARGET_OFFSET_COOL) is None
     assert result["data"].get(CONF_TARGET_OFFSET_HEAT) is None
+
+
+async def test_options_form_fields_all_have_a_label(hass: HomeAssistant):
+    """A field without an entry in strings.json renders as its raw key.
+
+    That is not a crash and no test catches it downstream, so the form can
+    grow a field and show the user "availability_retry_limit" indefinitely.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={"name": "Living Room AC"},
+        options={"host": "192.168.1.50"},
+    )
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    fields = {str(key.schema) for key in result["data_schema"].schema}
+
+    strings_file = Path(mitsubishi_wf_rac.__file__).parent / "strings.json"
+    strings = json.loads(strings_file.read_text(encoding="utf-8"))
+    assert set(strings["options"]["step"]["init"]["data"]) == fields
 
 
 # --- WfRacConfigFlow.is_matching() / _name ------------------------------

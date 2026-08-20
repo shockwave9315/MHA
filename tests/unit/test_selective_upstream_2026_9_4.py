@@ -1,15 +1,18 @@
-"""Regression coverage for selectively adopted upstream 2026.9.4 fixes."""
+"""Regression coverage for fork protocol fixes kept across upstream syncs."""
 
 from base64 import b64decode
 
 import pytest
 
+from custom_components.mitsubishi_wf_rac.wfrac.fork_parser import ForkRacParser
 from custom_components.mitsubishi_wf_rac.wfrac.models.aircon import (
     Aircon,
     AirconStat,
     HomeLeaveModeSetting,
 )
-from custom_components.mitsubishi_wf_rac.wfrac.rac_parser import RacParser
+from custom_components.mitsubishi_wf_rac.wfrac.rac_parser import (
+    SERVICE_DATA_COMPRESSOR_FREQ,
+)
 
 
 def _base_stat(**overrides) -> AirconStat:
@@ -34,12 +37,12 @@ def _base_stat(**overrides) -> AirconStat:
 @pytest.mark.parametrize(
     "request_kwargs",
     [
-        {"ServiceDataStatusRequest": True},
+        {"ServiceDataStatusRequest": (SERVICE_DATA_COMPRESSOR_FREQ,)},
         {"HomeLeaveModeStatusRequest": True},
     ],
 )
 def test_status_requests_carry_no_setting_set_bits(request_kwargs):
-    parser = RacParser()
+    parser = ForkRacParser()
     stat = _base_stat(Operation=True, PresetTemp=24.0, **request_kwargs)
 
     block = b64decode(parser.to_base64(stat))[:18]
@@ -49,13 +52,13 @@ def test_status_requests_carry_no_setting_set_bits(request_kwargs):
 
 
 def test_status_request_still_carries_cool_hot_judge_byte():
-    parser = RacParser()
+    parser = ForkRacParser()
     assert parser.status_request_to_byte(_base_stat(CoolHotJudge=False))[8] & 8 == 8
     assert parser.status_request_to_byte(_base_stat(CoolHotJudge=True))[8] & 8 == 0
 
 
 def test_normal_climate_command_still_writes_full_state():
-    parser = RacParser()
+    parser = ForkRacParser()
     stat = _base_stat(Operation=True, PresetTemp=24.0)
 
     block = b64decode(parser.to_base64(stat))[:18]
@@ -66,7 +69,7 @@ def test_normal_climate_command_still_writes_full_state():
 
 
 def test_home_leave_set_stays_a_real_write():
-    parser = RacParser()
+    parser = ForkRacParser()
     setting = HomeLeaveModeSetting(TempRule=10.0, TempSetting=10.0, AirFlow=0)
     stat = _base_stat(
         HomeLeaveModeForCooling=setting,
@@ -90,7 +93,7 @@ def test_home_leave_set_stays_a_real_write():
     ],
 )
 def test_indoor_coil_uses_ntc_curve_through_heating_range(raw, expected):
-    parser = RacParser()
+    parser = ForkRacParser()
     ac = Aircon()
 
     parser._parse_temperatures(ac, [0x81 - 256, 0x20, raw, 0])
@@ -100,7 +103,7 @@ def test_indoor_coil_uses_ntc_curve_through_heating_range(raw, expected):
 
 
 def test_indoor_coil_zero_byte_keeps_raw_but_temperature_unknown():
-    parser = RacParser()
+    parser = ForkRacParser()
     ac = Aircon()
 
     parser._parse_temperatures(ac, [0x81 - 256, 0x20, 0, 0])
@@ -110,8 +113,8 @@ def test_indoor_coil_zero_byte_keeps_raw_but_temperature_unknown():
 
 
 def test_signed_home_leave_temperatures_are_preserved():
-    """Protect the fork-specific signed Home Leave fix while syncing parser code."""
-    parser = RacParser()
+    """Protect signed Home Leave temperatures while syncing upstream parser code."""
+    parser = ForkRacParser()
     ac = Aircon()
     vals = []
     for sub, value in zip(

@@ -215,7 +215,11 @@ The `WCBN4612L` module image contains exactly these JSON key strings and no
 others `[FW]`. **This is closed for that branch only.** The `WF-RAC` and
 `WF-RAC-HTTPS` images are encrypted and could not be inventoried — and a live
 `WF-RAC-HTTPS 025` device returns two fields that are *not* in this list,
-`ledStat` (integer) and `mcu` (object, `{"firmVer": "200"}`) `[HW]`. Expect
+`ledStat` (integer) and `mcu` (object, `{"firmVer": "200"}`) `[HW]`.
+`ledStat` is the unit's own "LED ON" display-light toggle from the app's
+Option Settings screen (`OptionSettingViewModel.java`, gated by the
+`led_light` capability), not a Wi-Fi module status flag — a constant `1`
+just means the setting has never been switched off `[APP]`. Expect
 per-branch additions:
 
 `command`, `apiVer`, `operatorId`, `deviceId`, `timestamp`, `contents`,
@@ -313,7 +317,7 @@ Since the MHI frame is `SB0 SB1 SB2 DB0 DB1 …`, that gives:
 | `4` | `DB2` | setpoint | `[HW]` |
 | `5` | `DB3` | room temperature in use, `(raw−61)/4` °C | `[EXT]` `[HW]` |
 | `6` | `DB4` | error code | `[HW]` |
-| `7` | `DB5` | **undocumented.** Bit `0x10` active, but constant across every state measured so far | `[HW]` |
+| `7` | `DB5` | bit `0x10` echoes `command[8]` from the last command frame — not a device state (§5.3) | `[HW]` |
 | `8` | `DB6` | operation-data type/echo; bit `0x08` = "cool/hot judge" off | `[HW]` |
 | `9` | `DB7` | bit `0x02` = **compressor running** (see §4.6) | `[HW]` |
 | `10` | raw 20 | `bit0` occupancy/`Vacant`, `bit2` self-clean reset | `[HW]` |
@@ -518,12 +522,27 @@ code alone would not identify which of six answers came back.
 **Recipe** — verified end to end on real hardware `[HW]`:
 
 ```
-1. build a COMMAND block for the *current* state (change nothing)
+1. build a COMMAND block with NO set-bits: all zeros, command[5] = 0xFF,
+   command[8] as usual (see below - do not send the current state)
 2. trailer = [1] + [code, 0xFF, 0xFF, 0xFF]        # one request
 3. CRC, base64, POST setAirconStat
 4. the answer is ALREADY in that POST's own response:
    receive trailer -> [code, sel, value, value2]
 ```
+
+**Send an empty command block, not the current state.** The obvious approach —
+fill the block from the last status you read — makes the request a full write
+of that status, and any change made at the unit since you read it is undone.
+It is unnecessary: a value applies only together with its set-bit (§4.3), so a
+block with none of them set changes nothing while still carrying the trailer.
+Measured on two indoor units `[HW]`: `result: 0`, the complete operation-data
+trailer in the response, and power, mode, fan speed, setpoint and both vane
+axes unchanged — with the unit running and with it switched off.
+
+Carry `command[8]` as you would in a real command, though. It is the one field
+with no set-bit of its own, and dropping it clears the unit's echo of it in
+`DB5` bit `0x10` — harmless in itself, but it makes that bit look like a state
+change when it is only an echo of your own last frame. `[HW]`
 
 **Read the answer out of the `setAirconStat` response.** The round trip over the
 CNS bus finishes inside the HTTP request, so the reply block you get back
@@ -568,8 +587,8 @@ operating points are not a calibration, so the formulas stay `[INF]`.
 | `0x85` | Discharge pipe TD [°C] | `OP2 / 2 + 32` | idle `14` ⇒ 42 °C · load `17` ⇒ **43.5 °C** |
 | `0x13` | Outdoor EEV [pulses] | `OP2` | idle `c8` ⇒ 200 · load `5f`/`66` ⇒ **95 / 102** (valve closes under load) |
 | `0x82` | THO-R1 | outdoor heat exchanger, **no known conversion** | idle `3f` ⇒ 63 · load `49` ⇒ 73; tracks the outdoor unit, but not on the coil scale below |
-| `0x81` | THI-R1 [°C] | `outdoorTempList[2 × OP2]` | `20 5a ff` ⇒ raw 90, **`sel` = `0x20`** |
-| `0x87` | THI-R3 [°C] | `outdoorTempList[2 × OP2]` | `10 5a ff` ⇒ raw 90 |
+| `0x81` | THI-R1 [°C] | thermistor curve, see §5.4 | `20 5a ff` ⇒ raw 90, **`sel` = `0x20`** |
+| `0x87` | THI-R3 [°C] | thermistor curve, see §5.4 | `10 5a ff` ⇒ raw 90 |
 | `0x1E` | Total run hours [h] | `OP2 × 100` | `ff ff ff` ⇒ **no value** |
 | `0x1F` | Fan speed | `OP2` | `ff ff ff` ⇒ **no value** |
 | `0x0D` | *unknown* | — | `00 ff ff`, `sel` = `0x00` |
@@ -612,27 +631,46 @@ Notes on the shape of the answers `[HW]`:
   `0x82` read the same on both (paired correlation 0.89). `0x87` follows `0x81`
   per unit: identical while the compressor is off, higher while it runs — the
   difference is evaporator superheat. `[HW]`
-- **Conversion for `0x81`/`0x87`:** `outdoorTempList[2 × OP2]` — the same
-  thermistor table §5.2 uses for outdoor air, indexed at half resolution.
-  Anchored on two independent fixed points ~23 K apart, both matching within
-  ~1 K `[HW]`: the last reading before every compressor cut-off in cooling
-  lands on the service manual's 1.0 °C frost-protection threshold, and after a
-  long standstill both indoor coils settle on the separately measured room
-  temperature. **Only valid in cooling, and the heating end is now known to be
-  wrong.** In a heating run `OP2` climbs to at least 252, far past the table's
-  last index, and neither candidate survives: extended linearly the byte would
-  mean 103 °C, while the discharge pipe read 57 °C at the same moment — a
-  condenser cannot be hotter than the gas feeding it. MHI-AC-Ctrl's
-  `value × 0.327 − 11.4` for THI-R1/THI-R3 (its own comment calls it "only a
-  rough approximation") fits the top plausibly but misses the bottom by 5 K.
-  Taken together the sensor is a real thermistor curve, roughly 0.5 K per count
-  low and 0.33 K per count high, and the table is a local approximation of its
-  lower half. `[HW]` `[INF]`
-- **Because of that, both bytes are published raw as well.** Converting only
-  inside the anchored band and reporting nothing above it keeps the reading
-  honest, and the raw byte is what the rest of the curve has to be calibrated
-  against — a thermometer on the coil during a heating run. Anyone decoding
-  this should work from the byte, not from the converted value. `[INF]`
+- **Conversion for `0x81`/`0x87` — invert the divider, do not index a table:**
+
+      byte = G · Rs / (Rs + R(T)),   R(T) = R25 · exp(B · (1/T − 1/298.15))
+      R25 = 5200 Ω,  B = 3900 K,  G = 367,  Rs = 1912 Ω
+
+  MHI's service manuals print **one** characteristic for room air, indoor coil,
+  outdoor coil and outdoor air, and the sensor is a ~5 kΩ NTC with B ≈ 3950
+  `[EXT]`. The channels differ only in their series resistor, which is why the
+  app's two air tables (§5.2) map onto each other by a fractional-linear
+  relation rather than an offset — and why no indexing of either table ever fit
+  the coil. With the outdoor and indoor channels' own resistors (≈5.6 kΩ and
+  ≈4.0 kΩ) the same formula reproduces both published tables to ~0.3 K, so only
+  `Rs` is specific to the coil. `[INF]`
+- **`Rs` measured, not assumed.** Four infrared readings during one heating run
+  plus a standstill reading against a room thermometer, RMS 0.25 K over
+  23–46 °C. `[HW]` The infrared thermometer sees a mix of fin and intake air,
+  so the fin's share is a free parameter of the fit — and it is what settles
+  the question: one constant share explains all four readings on this curve,
+  while `outdoorTempList[2 × OP2]` extended upward would need that share to
+  halve between cooling and heating. Sample values: byte 47 → 5.5 °C,
+  75 → 17.0, 129 → 34.1, 170 → 45.8, 186 → 50.4, 252 → 72.1. `[HW]`
+  Measure on **matt tape stuck to the fins**: bare aluminium has an emissivity
+  near 0.35 and reads several kelvin too high in cooling, low in heating.
+- **Two caveats.** Above byte 170 the curve is extrapolation — physically
+  motivated, but no thermometer has been held against it, and byte 252 (seen on
+  a 36 °C day) would put the coil at 72 °C, past the 63 °C heating overload
+  cut-out that did not trigger. And at the cold end the curve reads ~5.5 °C
+  where the manual's frost protection cuts out at 1.0 °C; that threshold is
+  adjustable on the unit and what gets sampled is the value *before* the stop,
+  so a direct reading at byte 75 (16.8 °C measured, 17.0 °C from the curve) was
+  taken as the better evidence. `[HW]` `[INF]`
+- **`0x82` is the same sensor behind a different resistor.** MHI's diagram
+  covers the outdoor coil too, and a five-hour standstill puts it on
+  `Rs ≈ 1230 Ω` against a reference thermometer — the same channel type as the
+  indoor coil (both far below the air channels' 4.0/5.6 kΩ, as a sensor that
+  has to span frost to condensing temperature needs), but not the same value:
+  at byte 80 the two curves are 4.5 K apart. `[HW]` `[INF]` Readings taken in
+  afternoon sun run high on a west-facing unit, and no calibrated point exists
+  yet, so it stays a raw byte. A defrost cycle would anchor it exactly: the
+  outdoor coil sits at 0 °C while ice melts off it.
 - `0x82` is *not* on that scale — a resting outdoor coil reads far lower than a
   resting indoor coil at the same temperature. MHI-AC-Ctrl documents no formula
   for THO-R1 either. `[EXT]` Treat it as a raw byte.
@@ -646,10 +684,16 @@ Notes on the shape of the answers `[HW]`:
 
 Codes that MHI-AC-Ctrl uses but that are **absent** from the bridge's list, and
 therefore doubtful over this path: `0x7C` (protection number), `0x0C` (defrost).
-`[FW]` `0x7C` is now requested alongside the rest — it sits in the same
-operation-data address space, and a code the module does not serve simply
-leaves its value empty, which costs nothing. Whether any unit answers it is
-still open. `0x0C` is not requested.
+`[FW]` `0x7C` is now requested alongside the rest, as `Protection Number (raw)`
+— it sits in the same operation-data address space, and a code the module does
+not serve simply leaves its value empty, which costs nothing. It does answer,
+confirmed on three units across single- and multi-split `[HW]`, but it only
+ever reads `0`: a controlled test that reproduced a real overload clamp (see
+§5.7) left it unmoved. Read together with the stop-code table
+(`error_codes.py`), which describes its non-zero values as escalated faults or
+stops rather than the speed-limit clamps in §5.7, the code appears to track
+protective *stops* only — it is not a general-purpose "unit is protecting
+itself" flag. `0x0C` is not requested.
 
 ### 5.5 Code `248` — the one the app does use
 
@@ -683,6 +727,49 @@ path is open on the WF-RAC interface `[FW]`, but **it is untested `[INF]`**, and
 it is a real control command, not a query. This is the single most requested
 reason for replacing the module with an ESP32, and it may not require replacing
 anything.
+
+### 5.7 Compressor overload protection (speed-limit clamps)
+
+Separate from the stop codes in §4.4/`error_codes.py`, and from `Protection
+Number (raw)` in §5.4: this control never stops the compressor or reports a
+code, it only raises its **lower** speed limit for as long as the trigger
+condition holds. A controlled test — an outdoor unit's air-temperature sensor
+heated past the documented cooling threshold — reproduced the expected
+speed-floor rise while `Protection Number (raw)` stayed `0` throughout,
+confirming the code does not cover it `[HW]`. The only outside signal is the
+effect itself, on the Compressor Frequency sensor: the reading holds at or
+above the floor instead of modulating down.
+
+The mechanism is documented in the SRK service manuals for each indoor series,
+keyed to outdoor air temperature with per-step hysteresis, and the numbers
+differ by series and — within a series — by indoor unit size `[EXT]`:
+
+| Series | Step (outdoor air) | Resets below | Lower limit, SRK20-35 | Lower limit, SRK50 |
+| --- | --- | --- | --- | --- |
+| ZS-WF, ZT-WF | ≥ 41 °C | 40 °C | 30 rps | 27 rps |
+| ZS-WF, ZT-WF | ≥ 47 °C | 46 °C | 45 rps | 35 rps |
+| ZSX-WF, ZR-WF | ≥ 38 °C | 37 °C | 25 rps | — |
+| ZSX-WF, ZR-WF | ≥ 41 °C | 40 °C | 30 rps | — |
+| ZSX-WF, ZR-WF | ≥ 47 °C | 46 °C | 40 rps | — |
+
+(`—`: not yet transcribed for SRK50/60 on the ZSX-WF/ZR-WF side.)
+
+Heating has its own, separate table with more steps, and starts from a
+noticeably lower outdoor temperature per series — 22 °C for ZS-WF against
+17 °C (indoor fan) / 13 °C (outdoor unit) for ZSX-WF `[EXT]` — but the exact
+speed floors for that direction have not been transcribed here yet.
+
+**Deliberately not a sensor.** A client cannot tell from the wire which of
+these rows applies — the protocol carries a capability group, not the SRK
+series or size class `[FW]` `[INF]` — so an automatic binary sensor built on
+outdoor temperature would have to ask the user to pick their model and trust
+the answer, silently wrong for anyone who picks the wrong line. Multi-split
+adds a third case on top: the outdoor unit runs its own overload control there,
+so even a correctly-picked indoor table does not necessarily govern.
+
+Where the series and size are known, a plain template sensor with hysteresis
+on the raw outdoor-temperature entity, comparing against the relevant row,
+covers this without needing it built in.
 
 ---
 

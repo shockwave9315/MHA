@@ -9,7 +9,8 @@
     },
     "abort": {
       "existing_instance_updated": "Vorhandene Konfiguration aktualisiert.",
-      "already_configured": "Klima ist bereits konfiguriert"
+      "already_configured": "Klima ist bereits konfiguriert",
+      "reconfigure_successful": "Neukonfiguration erfolgreich"
     },
     "step": {
       "user": {
@@ -17,8 +18,7 @@
           "name": "Klima Name",
           "host": "Host (IP) Adresse",
           "port": "Port",
-          "force_update": "Doppelte IP ignorieren (kann/wird Fehler verursachen, überprüfen Sie daher das Fehlerprotokoll)",
-          "create_swing_mode_select": "Ob zusätzliche Schwenkmodus-Auswahlen erstellt werden sollen."
+          "force_update": "Doppelte IP ignorieren (kann/wird Fehler verursachen, überprüfen Sie daher das Fehlerprotokoll)"
         },
         "description": "Bitte geben Sie die korrekten Informationen ein, um die Klimaanlage manuell hinzuzufügen",
         "title": "WF-RAC AC Verbindungs-Info"
@@ -29,7 +29,45 @@
         "data": {
           "name": "Klima Name"
         }
+      },
+      "reconfigure": {
+        "data": {
+          "name": "Klima Name",
+          "host": "Host (IP) Adresse",
+          "port": "Port"
+        },
+        "description": "Aktualisieren Sie die Verbindungsdaten für diese Klimaanlage.",
+        "title": "WF-RAC-Verbindung neu konfigurieren"
       }
+    }
+  },
+  "exceptions": {
+    "cannot_connect": {
+      "message": "Die Klimaanlage unter {device} war nicht erreichbar."
+    },
+    "temperature_required": {
+      "message": "Eine Zieltemperatur ist erforderlich."
+    },
+    "temperature_below_minimum": {
+      "message": "{temperature} °C liegt unter dem Minimum von {min_temp} °C für diesen Modus."
+    },
+    "temperature_above_maximum": {
+      "message": "{temperature} °C liegt über dem Maximum von {max_temp} °C für diesen Modus."
+    },
+    "home_leave_mode_not_supported": {
+      "message": "Dieses Modell meldet die Home-Leave-Mode-Fähigkeit nicht."
+    },
+    "home_leave_mode_status_unknown": {
+      "message": "Die Home-Leave-Mode-Werte sind noch nicht bekannt. Rufen Sie zuerst einmal die Aktion \"Home-Leave-Mode-Status abfragen\" der Klima-Entität auf - das Gerät liefert diese Werte nicht bei einer normalen Abfrage."
+    },
+    "entity_not_energy_total_sensor": {
+      "message": "{entity_id} ist kein Energieverbrauch-Gesamt-Sensor."
+    }
+  },
+  "issues": {
+    "too_many_devices": {
+      "title": "Zu viele Geräte an {device_name} registriert",
+      "description": "Home Assistant konnte sich bei dieser Klimaanlage nicht registrieren, weil die Konten-Tabelle des Moduls voll ist. Öffnen Sie die Smart-M-Air-App und entfernen Sie ein anderes registriertes Gerät, oder setzen Sie das Modul auf Werkseinstellungen zurück, und laden Sie diese Integration anschließend neu."
     }
   },
   "options": {
@@ -37,18 +75,19 @@
       "init": {
         "description": "Nachfolgend finden Sie die Optionen, die Sie für diese Klimaanlage ändern können.",
         "data": {
-          "host": "Host (IP) Adresse",
           "availability_retry_limit": "max. Anzahl Wiederholungen (mind. 3)",
           "firmware_update_check": "Firmware-Update-Prüfung (Online)",
-          "service_data": "Servicedaten",
-          "create_swing_mode_select": "Ob zusätzliche Schwenkmodus-Auswahlen erstellt werden sollen.",
           "indoor_offset": "Innentemperatur Sensor-Offset",
           "outdoor_offset": "Außentemperatur Sensor-Offset",
           "target_offset": "Zieltemperatur-Offset",
           "target_offset_cool": "Zieltemperatur-Offset (Kühlen)",
           "target_offset_heat": "Zieltemperatur-Offset (Heizen)"
         },
-        "title": "WF-RAC AC Verbindungs-Info"
+        "title": "WF-RAC Optionen",
+        "data_description": {
+          "target_offset_cool": "Leer lassen, um den allgemeinen Zieltemperatur-Offset zu verwenden.",
+          "target_offset_heat": "Leer lassen, um den allgemeinen Zieltemperatur-Offset zu verwenden."
+        }
       }
     }
   },
@@ -225,11 +264,20 @@
       "compressor_frequency": {
         "name": "Kompressorfrequenz"
       },
+      "compressor_frequency_raw": {
+        "name": "Kompressorfrequenz (Rohwert)"
+      },
       "operating_current": {
         "name": "Betriebsstrom"
       },
+      "operating_current_raw": {
+        "name": "Betriebsstrom (Rohwert)"
+      },
       "hot_gas_temp": {
         "name": "Heißgastemperatur"
+      },
+      "hot_gas_temp_raw": {
+        "name": "Heißgastemperatur (Rohwert)"
       },
       "eev_pulses": {
         "name": "EEV-Pulse"
@@ -244,19 +292,19 @@
         "name": "Innen-Wärmetauscher Austritt Temperatur"
       },
       "indoor_coil_raw": {
-        "name": "Innen-Wärmetauscher Fühler (roh)"
+        "name": "Innen-Wärmetauscher Temperatur (Rohwert)"
       },
       "indoor_coil_outlet_raw": {
-        "name": "Innen-Wärmetauscher Austritt Fühler (roh)"
+        "name": "Innen-Wärmetauscher Austritt Temperatur (Rohwert)"
       },
       "outdoor_coil_raw": {
-        "name": "Außen-Wärmetauscher Fühler (roh)"
+        "name": "Außen-Wärmetauscher Temperatur (Rohwert)"
       },
       "discharge_superheat_raw": {
-        "name": "Druckgas-Überhitzung (roh)"
+        "name": "Druckgas-Überhitzung (Rohwert)"
       },
       "protection_raw": {
-        "name": "Schutzcode (roh)"
+        "name": "Schutznummer (Rohwert)"
       }
     },
     "binary_sensor": {
@@ -270,7 +318,6 @@
         "name": "Kompressoranforderung"
       }
     },
-    "switch": {},
     "update": {
       "firmware_update": {
         "name": "Firmware-Update"
@@ -280,6 +327,7 @@
       "reset_energy_total": {
         "name": "Energieverbrauch gesamt zurücksetzen"
       }
-    }
+    },
+    "switch": {}
   }
 }

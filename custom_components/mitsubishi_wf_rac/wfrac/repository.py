@@ -10,7 +10,7 @@ import os
 import ssl
 import time
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import aiohttp
 from aiohttp import ClientConnectionError
@@ -202,7 +202,7 @@ class Repository:
                         raise AirconCommandError(
                             f"Aircon returned HTTP {resp.status} for {command!r}: {body}"
                         )
-                    return json.loads(body)
+                    return cast(dict[str, Any], json.loads(body))
             except (ClientConnectionError, asyncio.TimeoutError) as ex:
                 raise AirconConnectionError(f"Aircon returned error: {ex}") from ex
 
@@ -231,14 +231,11 @@ class Repository:
                 try:
                     json_response = await _execute_request(self._method)
                 except AirconCommandError as ex:
-                    # A write refusal (notably the optional Service Data 501)
-                    # does prove that the transport is alive, so keep the
-                    # current protocol for writes. Read/discovery commands are
-                    # different: some stale plaintext/HTTPS endpoints answer
-                    # the wrong scheme with an HTTP status instead of dropping
-                    # the connection. Probe the alternate transport in that
-                    # case, but keep this original command error to restore if
-                    # the alternate does not actually work.
+                    # A write refusal does prove that the transport is alive,
+                    # so keep the current protocol for writes. Read/discovery
+                    # commands are different: some stale endpoints answer the
+                    # wrong scheme with an HTTP status instead of dropping the
+                    # connection. Probe the alternate transport in that case.
                     if command not in ("getDeviceInfo", "getAirconStat"):
                         raise
                     stale_method = self._method
@@ -247,11 +244,7 @@ class Repository:
                     self._method = None
                 except AirconConnectionError:
                     # A persisted method can be stale after a firmware/protocol
-                    # change. Setup retries recreate Repository from the same
-                    # ConfigEntry, so merely clearing _method and raising would
-                    # wedge every retry on the same stale value. Remember the
-                    # old protocol as the future preference, but probe the
-                    # alternate transport in this same call.
+                    # change. Probe the alternate transport in this same call.
                     stale_method = self._method
                     self._preferred_method = stale_method
                     self._method = None
@@ -271,28 +264,24 @@ class Repository:
                             # Both transports answered with a status error. We
                             # have no evidence the persisted method changed, so
                             # restore it and preserve the original semantic
-                            # error (e.g. an account rejection) for the caller.
+                            # error for the caller.
                             self._method = stale_method
                             self._preferred_method = stale_method
                             raise stored_command_error
                         # The old transport was unreachable and the alternate
-                        # one answered, so the alternate transport itself is
-                        # valid even if this command was refused.
+                        # one answered, so the alternate is valid even if this
+                        # particular command was refused.
                         self._method = alternate_method
                         self._preferred_method = alternate_method
                         raise
                     except AirconConnectionError:
                         if stored_command_error is not None:
-                            # The stored transport answered while the alternate
-                            # one did not. Restore it and surface the original
-                            # command error so account-recovery behavior remains
-                            # intact instead of misclassifying it as an outage.
+                            # Stored transport answered while alternate did not.
                             self._method = stale_method
                             self._preferred_method = stale_method
                             raise stored_command_error
-                        # Neither transport answered. Leave the active method
-                        # unset, but retain the last successful one as the
-                        # preferred first candidate for the next discovery.
+                        # Neither transport answered. Keep the last successful
+                        # method only as preferred for the next discovery.
                         raise
                     else:
                         self._method = alternate_method
@@ -303,7 +292,7 @@ class Repository:
                         )
                 else:
                     _LOGGER.debug("No stored method; attempting discovery...")
-                    methods = (
+                    methods: tuple[str, ...] = (
                         (self._preferred_method,)
                         if self._preferred_method in ("http", "https")
                         else ()
@@ -352,15 +341,11 @@ class Repository:
         Nothing here changes what the caller does with the response. Which
         firmware reports which code on success over the local API is not
         established, and a command wrongly treated as failed would be worse
-        than the silent failure this makes visible - reports of "nothing
-        happens, and nothing in the log" (#212) currently have nothing to go
-        on at all.
-
-        One line per command entering a failing state, like everywhere else in
-        this integration: a unit that answers the same refusal every minute
-        would otherwise fill the log with a message the user has already read.
+        than the silent failure this makes visible.
         """
         raw = response.get("result")
+        if raw is None:
+            return
         try:
             code = int(raw)
         except (TypeError, ValueError):
@@ -380,13 +365,15 @@ class Repository:
             RESULT_CODES.get(code, "meaning unknown"),
         )
 
-    async def get_info(self) -> dict:
+    async def get_info(self) -> dict[str, Any]:
         """Simple command to get aircon details"""
-        return (await self._post("getDeviceInfo"))["contents"]
+        response = await self._post("getDeviceInfo")
+        return cast(dict[str, Any], response["contents"])
 
     async def get_airco_id(self) -> str:
         """Simple command to get aircon ID"""
-        return (await self.get_info())["airconId"]
+        info = await self.get_info()
+        return cast(str, info["airconId"])
 
     async def update_account_info(
         self, airco_id: str, time_zone: str
@@ -400,29 +387,26 @@ class Repository:
         }
         return await self._post("updateAccountInfo", contents)
 
-    async def del_account_info(self, airco_id: str) -> dict:
+    async def del_account_info(self, airco_id: str) -> dict[str, Any]:
         """delete the account info on the airco"""
         contents = {"accountId": self._operator_id, "airconId": airco_id}
         return await self._post("deleteAccountInfo", contents)
 
-    async def get_aircon_stats(self, airco_id: str | None = None, raw=False) -> dict:
+    async def get_aircon_stats(
+        self, airco_id: str | None = None, raw: bool = False
+    ) -> dict[str, Any]:
         """Get the Aricon Stats from the Airco
 
         Sends the airconId in the request body. The official Smart M-Air app and
-        every other reverse-engineered client (homebridge-mhi-wfrac,
-        mqtt2mhi-wf-rac, ioBroker.woso_mitsu_aircon_rac) include it here; the
-        value itself is ignored by the module but its presence is required by
-        some firmware revisions, which otherwise reject getAirconStat with
-        HTTP 400 / result:2. Older firmware tolerated the field being absent,
-        which is why omitting it worked until now. Kept optional so callers
-        without an airconId (none in this integration) still work.
+        every other reverse-engineered client include it here; the value itself
+        is ignored by the module but its presence is required by some firmware.
         """
         contents = {"airconId": airco_id} if airco_id is not None else None
         result = await self._post("getAirconStat", contents)
-        return result if raw else result["contents"]
+        return result if raw else cast(dict[str, Any], result["contents"])
 
     async def send_airco_command(self, airco_id: str, command: str) -> str:
         """send command to the Airco"""
         contents = {"airconId": airco_id, "airconStat": command}
         result = await self._post("setAirconStat", contents)
-        return result["contents"]["airconStat"]
+        return cast(str, result["contents"]["airconStat"])
