@@ -80,6 +80,7 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             hass: HomeAssistant,
             data: dict[str, Any],
             exclude_entry_id: str | None = None,
+            expected_airco_id: str | None = None,
     ) -> dict[str, Any]:
         """Validate the user input allows us to connect, and register with the airco device"""
         if len(data[CONF_HOST]) < 3:
@@ -111,9 +112,16 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except (AirconApiError, KeyError, TypeError) as query_failed:
             raise CannotConnect(reason=str(query_failed)) from query_failed
 
-        data[CONF_AIRCO_ID] = airco_id
         if not airco_id:
             raise CannotConnect(reason="unknown reason")
+
+        # Reconfigure must keep the existing entry bound to the same physical
+        # WF-RAC unit. Reject a host that resolves to another airco before
+        # mutating the candidate data or registering our account on that unit.
+        if expected_airco_id is not None and airco_id != expected_airco_id:
+            raise CannotConnect(reason="host belongs to a different WF-RAC unit")
+
+        data[CONF_AIRCO_ID] = airco_id
 
         _LOGGER.info(
             "Trying to register OperatorId[%s] on Airco[%s]",
@@ -307,7 +315,10 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data[CONF_DEVICE_ID] = reconfigure_entry.data[CONF_DEVICE_ID]
 
                 info = await self._async_register_airco(
-                    self.hass, data, exclude_entry_id=reconfigure_entry.entry_id
+                    self.hass,
+                    data,
+                    exclude_entry_id=reconfigure_entry.entry_id,
+                    expected_airco_id=reconfigure_entry.data[CONF_AIRCO_ID],
                 )
 
                 new_data = {**reconfigure_entry.data, **data}
