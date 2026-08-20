@@ -90,7 +90,7 @@ async def test_diagnostics_redacts_sensitive_data_and_is_json_serializable(hass)
         "firmware_update_available": True,
         "firmware_update_check_enabled": True,
         "num_accounts": 2,
-        "updated_by": "local",
+        "updated_by": "**REDACTED**",
         "account_expires": 1_725_000_000,
         "led_status": 1,
         "auto_heating": 0,
