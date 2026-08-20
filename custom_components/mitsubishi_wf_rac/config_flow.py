@@ -302,6 +302,7 @@ class WfRacConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input:
             try:
                 data = dict(user_input)
+                data.setdefault(CONF_PORT, current[CONF_PORT])
                 data[CONF_OPERATOR_ID] = reconfigure_entry.data[CONF_OPERATOR_ID]
                 data[CONF_DEVICE_ID] = reconfigure_entry.data[CONF_DEVICE_ID]
 
